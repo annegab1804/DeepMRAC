@@ -1,0 +1,8 @@
+numpy
+tensorflow>=2
+pydicom>=1.2.0
+nibabel
+nipype
+dicom2nifti
+wget
+nilearn
