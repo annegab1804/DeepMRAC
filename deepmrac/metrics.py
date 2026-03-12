@@ -28,7 +28,7 @@ def load_dicom_series(
 def calculate_dice(
     image_a: np.ndarray,
     image_b: np.ndarray,
-    threshold: float = -500
+    threshold: float,
 ) -> float:
     """Calculates the Dice Similarity Coefficient (DSC) for a specific tissue class.
 
@@ -40,7 +40,6 @@ def calculate_dice(
         image_a: The first 3D volume (e.g., sCT).
         image_b: The second 3D volume (e.g., Umap).
         threshold: The intensity value used to binarize the images. 
-            Defaults to -500 (standard for body/air separation).
 
     Returns:
         The Dice coefficient as a float between 0.0 and 1.0.
@@ -54,23 +53,23 @@ def calculate_dice(
 def calculate_quality_metrics(
     sct_path: str,
     umap_path: str,
-    dice_threshold: float = -500
 ) -> dict[str, float]:
-    """Computes MAE, PSNR, SSIM, and Dice metrics between a synthetic CT and a Umap.
+    """Computes metrics between a synthetic CT and a umap.
 
     This function loads both DICOM series, ensures they have matching dimensions,
     and calculates standard image quality metrics to evaluate model performance.
-    MAE is particularly useful for quantifying error in Hounsfield Units (HU).
+    Computes bias estimates (RE, ARE, ME, MAE) plus PSNR, SSIM, and Dice.
 
     Args:
         sct_path: Path to the folder containing the generated sCT DICOM files.
         umap_path: Path to the folder containing the reference Umap IMA/DICOM files.
-        dice_threshold: The Hounsfield Unit threshold for the Dice calculation.
-            Defaults to -500.
 
     Returns:
         A dictionary containing the calculated metrics:
+            - "ME": Mean Error (lower is better).
             - "MAE": Mean Absolute Error (lower is better).
+            - "RE": Relative Error (lower is better).
+            - "ARE": Absolute Relative Error (lower is better).
             - "PSNR": Peak Signal-to-Noise Ratio (higher is better).
             - "SSIM": Structural Similarity Index Measure (closer to 1 is better).
             - "Dice": Dice Similarity Coefficient (closer to 1 is better).
@@ -86,28 +85,36 @@ def calculate_quality_metrics(
     if sct_vol.shape != umap_vol.shape:
         raise ValueError(f"Shape mismatch: sCT {sct_vol.shape} vs Umap {umap_vol.shape}")
     
-    # Calculate Mean Absolute Error (MAE)
-    mae_val = np.mean(np.abs(sct_vol - umap_vol))
+    metrics_dict = {}
+    modes = {
+        'tissue': -500, # Tissue-air
+        'bone': 200     # Bone-soft
+    }
+    
+    for prefix, threshold in modes.items():
+        mask = umap_vol > threshold
+        sct_valid = sct_vol[mask]
+        umap_valid = umap_vol[mask]
+        
+        if len(umap_valid) > 0:
+            diff = sct_valid - umap_valid
+            metrics_dict[f"{prefix}_ME"] = float(np.mean(diff))
+            metrics_dict[f"{prefix}_MAE"] = float(np.mean(np.abs(diff)))
+            denominator = np.abs(umap_valid) + 1.0
+            metrics_dict[f"{prefix}_RE"] = float(np.mean(diff / denominator))
+            metrics_dict[f"{prefix}_ARE"] = float(np.mean(np.abs(diff) / denominator))
+            metrics_dict[f"{prefix}_Dice"] = float(calculate_dice(sct_vol, umap_vol, threshold))
+        else:
+            for m in ["ME", "MAE", "RE", "ARE", "Dice"]:
+                metrics_dict[f"{prefix}_{m}"] = 0.0
 
     # Normalize for PSNR/SSIM (Metrics usually expect a defined range)
     # We use the max/min of the reference (Umap)
     data_range = umap_vol.max() - umap_vol.min()
+    metrics_dict["PSNR"] = float(peak_signal_noise_ratio(umap_vol, sct_vol, data_range=data_range))
+    metrics_dict["SSIM"] = float(structural_similarity(umap_vol, sct_vol, data_range=data_range))
 
-    # Calculate PSNR
-    psnr_val = peak_signal_noise_ratio(umap_vol, sct_vol, data_range=data_range)
-
-    # Calculate SSIM
-    ssim_val = structural_similarity(umap_vol, sct_vol, data_range=data_range)
-
-    # Calculate Dice (Thresholded for 'Non-Air' pixels)
-    dice_val = calculate_dice(sct_vol, umap_vol, threshold=dice_threshold)
-
-    return {
-        "MAE": float(mae_val),
-        "PSNR": psnr_val,
-        "SSIM": ssim_val,
-        "Dice": dice_val,
-    }
+    return metrics_dict
 
 def save_metrics_to_csv(
     metrics_dict: dict,
@@ -128,16 +135,15 @@ def save_metrics_to_csv(
     """
     os.makedirs(output_folder, exist_ok=True)
     csv_path = os.path.join(output_folder, filename)
-    
+
     new_data = {
         'Timestamp': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
-        'Method': [rmi_type],
-        'MAE': [metrics_dict.get('MAE')],
-        'PSNR': [metrics_dict.get('PSNR')],
-        'SSIM': [metrics_dict.get('SSIM')],
-        'Dice': [metrics_dict.get('Dice')]
+        'Method': [rmi_type]
     }
-    
+    # Add all metrics (PSNR, SSIM, tissue_MAE, bone_MAE, etc.)
+    for key, value in metrics_dict.items():
+        new_data[key] = [value]
+
     df_new = pd.DataFrame(new_data)
     
     if os.path.isfile(csv_path):

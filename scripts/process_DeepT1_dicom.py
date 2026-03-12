@@ -1,6 +1,7 @@
 import argparse
 import tempfile
 import shutil
+import os
 import nibabel as nib
 import numpy as np
 from deepmrac.utils import (
@@ -49,9 +50,19 @@ def run_pipeline(
         `output_folder`.
 
     Raises:
-        FileNotFoundError: If the input paths do not exist.
-        RuntimeError: If the NIfTI conversion or model prediction fails.
+        FileExistsError: If the `output_folder` already exists and contains files, 
+            or if the temporary sorting directory is not empty.
+        FileNotFoundError: If any of the input paths do not exist.
+        AttributeError: If a DICOM file is encountered that lacks an 'InstanceNumber'.
+        RuntimeError: If two DICOM files share the same InstanceNumber, or if 
+            NIfTI conversion/model prediction fails.
     """
+    if os.path.exists(output_folder) and os.listdir(output_folder):
+        raise FileExistsError(
+            f"The output folder '{output_folder}' already exists and is not empty. "
+            "Please delete it or provide a different path to avoid data contamination."
+        )
+    
     # Create temporary folder    
     tmpdir = tempfile.mkdtemp()
 
@@ -90,14 +101,24 @@ def run_pipeline(
         # Calculate metrics
         metrics_dict = calculate_quality_metrics(
             sct_path=output_folder,
-            umap_path=umap_path,
-            dice_threshold=300
+            umap_path=f"{tmpdir}/umap_dcm",
         )
 
-        print(f"Mean absolut error (MAE)): {metrics_dict['MAE']}")
-        print(f"Peek signal to noise ratio (PSNR): {metrics_dict['PSNR']}")
-        print(f"Structural Similarity Index Measure (SSIM) : {metrics_dict['SSIM']}")
-        print(f"Dice similarity coefficient (DSC): {metrics_dict['Dice']}")
+        if verbose:
+            print("\n" + "="*30)
+            print(" GLOBAL QUALITY METRICS ")
+            print("="*30)
+            print(f"PSNR: {metrics_dict['PSNR']:.2f}")
+            print(f"SSIM: {metrics_dict['SSIM']:.4f}")
+            
+            for mode in ['tissue', 'bone']:
+                print(f"\n--- {mode.upper()} ANALYSIS ---")
+                print(f"MAE:  {metrics_dict[f'{mode}_MAE']:.4f}")
+                print(f"ME:   {metrics_dict[f'{mode}_ME']:.4f}")
+                print(f"RE:   {metrics_dict[f'{mode}_RE']:.4f}")
+                print(f"ARE:  {metrics_dict[f'{mode}_ARE']:.4f}")
+                print(f"Dice: {metrics_dict[f'{mode}_Dice']:.4f}")
+            print("="*30)
 
         save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='T1', output_folder=f"{output_folder}/metrics")
 

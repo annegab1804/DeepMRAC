@@ -30,28 +30,38 @@ def sort_files(
         FileExistsError: If the '{temp_folder}' directory already exists.
         AttributeError: If a file is encountered that lacks an 'InstanceNumber' 
             DICOM tag.
+        RuntimeError: If two Dicom files have the same InstanceNumber?
     """
-    os.makedirs(f'{temp_subfolder}', exist_ok=True)
+    if os.path.exists(temp_subfolder) and os.listdir(temp_subfolder):
+        raise FileExistsError(f"Folder {temp_subfolder} is not empty !")
     
-    for root,subdirs,files in os.walk(source_folder):
+    os.makedirs(temp_subfolder, exist_ok=True)
         
-        if len(subdirs) > 0:
-            continue
-        if not len(files) > 0:
+    for root,subdirs,files in os.walk(source_folder):
+        if len(subdirs) > 0 or not files:
             continue
         
         if verbose:
             print("Found files in %s. Making copy" % root)
         
         for f in files:
-            if f.startswith('.'):
+            if f.startswith('.'): 
                 continue
-            dcm = dicom.dcmread(f"{root}/{f}")
+            
+            file_path = os.path.join(root, f)
+            try:
+                dcm = dicom.dcmread(file_path)
+            except dicom.errors.InvalidDicomError:
+                continue
 
-            shutil.copyfile(
-                os.path.join(root, f), 
-                f"{temp_subfolder}/dicom{int(dcm.InstanceNumber)}.ima"
-            )
+            if not hasattr(dcm, 'InstanceNumber'):
+                raise AttributeError(f"File {f} lacks an 'InstanceNumber' DICOM tag.")
+
+            dest_path = os.path.join(temp_subfolder, f"dicom{int(dcm.InstanceNumber)}.ima")
+            if os.path.exists(dest_path):
+                raise RuntimeError(f"InstanceNumber {dcm.InstanceNumber} already exists in {temp_subfolder}!")
+
+            shutil.copyfile(file_path, dest_path)
 
 def convert_to_nifti(
     dicom_dir: str,
