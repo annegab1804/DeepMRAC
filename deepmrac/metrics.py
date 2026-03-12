@@ -32,13 +32,12 @@ def calculate_dice(
 ) -> float:
     """Calculates the Dice Similarity Coefficient (DSC) for a specific tissue class.
 
-    Since medical volumes are continuous (Hounsfield Units), this function 
-    binarizes the input arrays at a specific threshold to create masks before 
-    calculating overlap.
+    This function binarizes the input arrays at a specific threshold to create masks
+    before calculating overlap.
 
     Args:
         image_a: The first 3D volume (e.g., sCT).
-        image_b: The second 3D volume (e.g., Umap).
+        image_b: The second 3D volume (e.g., CT).
         threshold: The intensity value used to binarize the images. 
 
     Returns:
@@ -52,9 +51,9 @@ def calculate_dice(
 
 def calculate_quality_metrics(
     sct_path: str,
-    umap_path: str,
+    ct_path: str,
 ) -> dict[str, float]:
-    """Computes metrics between a synthetic CT and a umap.
+    """Computes metrics between a synthetic CT and the original CT.
 
     This function loads both DICOM series, ensures they have matching dimensions,
     and calculates standard image quality metrics to evaluate model performance.
@@ -62,7 +61,7 @@ def calculate_quality_metrics(
 
     Args:
         sct_path: Path to the folder containing the generated sCT DICOM files.
-        umap_path: Path to the folder containing the reference Umap IMA/DICOM files.
+        ct_path: Path to the folder containing the reference CT DICOM files.
 
     Returns:
         A dictionary containing the calculated metrics:
@@ -75,44 +74,43 @@ def calculate_quality_metrics(
             - "Dice": Dice Similarity Coefficient (closer to 1 is better).
 
     Raises:
-        ValueError: If the shapes of the sCT and Umap volumes do not match.
+        ValueError: If the shapes of the sCT and CT volumes do not match.
     """
     # Load volumes
     sct_vol = load_dicom_series(sct_path)
-    umap_vol = load_dicom_series(umap_path)
+    ct_vol = load_dicom_series(ct_path)
 
     # Ensure shapes match (Crucial for voxel-wise comparison)
-    if sct_vol.shape != umap_vol.shape:
-        raise ValueError(f"Shape mismatch: sCT {sct_vol.shape} vs Umap {umap_vol.shape}")
+    if sct_vol.shape != ct_vol.shape:
+        raise ValueError(f"Shape mismatch: sCT {sct_vol.shape} vs Umap {ct_vol.shape}")
     
     metrics_dict = {}
     modes = {
-        'tissue': -500, # Tissue-air
-        'bone': 200     # Bone-soft
+        'tissue': 500, # Tissue-air
+        'bone': 1200     # Bone-soft
     }
     
     for prefix, threshold in modes.items():
-        mask = umap_vol > threshold
+        mask = ct_vol > threshold
         sct_valid = sct_vol[mask]
-        umap_valid = umap_vol[mask]
+        ct_valid = ct_vol[mask]
         
-        if len(umap_valid) > 0:
-            diff = sct_valid - umap_valid
+        if len(ct_valid) > 0:
+            diff = sct_valid - ct_valid
             metrics_dict[f"{prefix}_ME"] = float(np.mean(diff))
             metrics_dict[f"{prefix}_MAE"] = float(np.mean(np.abs(diff)))
-            denominator = np.abs(umap_valid) + 1.0
-            metrics_dict[f"{prefix}_RE"] = float(np.mean(diff / denominator))
-            metrics_dict[f"{prefix}_ARE"] = float(np.mean(np.abs(diff) / denominator))
-            metrics_dict[f"{prefix}_Dice"] = float(calculate_dice(sct_vol, umap_vol, threshold))
+            metrics_dict[f"{prefix}_RE"] = float(np.mean(diff / np.abs(ct_valid)))
+            metrics_dict[f"{prefix}_ARE"] = float(np.mean(np.abs(diff) / np.abs(ct_valid)))
+            metrics_dict[f"{prefix}_Dice"] = float(calculate_dice(sct_vol, ct_vol, np.abs(ct_valid)))
         else:
             for m in ["ME", "MAE", "RE", "ARE", "Dice"]:
                 metrics_dict[f"{prefix}_{m}"] = 0.0
 
     # Normalize for PSNR/SSIM (Metrics usually expect a defined range)
-    # We use the max/min of the reference (Umap)
-    data_range = umap_vol.max() - umap_vol.min()
-    metrics_dict["PSNR"] = float(peak_signal_noise_ratio(umap_vol, sct_vol, data_range=data_range))
-    metrics_dict["SSIM"] = float(structural_similarity(umap_vol, sct_vol, data_range=data_range))
+    # We use the max/min of the reference (CT)
+    data_range = ct_vol.max() - ct_vol.min()
+    metrics_dict["PSNR"] = float(peak_signal_noise_ratio(ct_vol, sct_vol, data_range=data_range))
+    metrics_dict["SSIM"] = float(structural_similarity(ct_vol, sct_vol, data_range=data_range))
 
     return metrics_dict
 

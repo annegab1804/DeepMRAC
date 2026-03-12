@@ -1,10 +1,20 @@
-import os, shutil, datetime
+import argparse, os, shutil, datetime
 from pathlib import Path
 import numpy as np 
 import pydicom as dicom  
 import nibabel as nib
 import dicom2nifti
 from nilearn.image import resample_img
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
 
 def sort_files(
     source_folder: str,

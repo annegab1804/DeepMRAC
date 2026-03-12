@@ -9,7 +9,8 @@ from deepmrac.utils import (
     convert_to_nifti,
     load_and_resample_images,
     resample_to_output_format,
-    to_dcm
+    to_dcm,
+    str2bool
 )
 from deepmrac.predictions import predict_DeepDixon
 from deepmrac.metrics import calculate_quality_metrics, save_metrics_to_csv
@@ -19,6 +20,7 @@ def run_pipeline(
     opposedphase_path: str,
     umap_path: str,
     output_folder: str,
+    ct_path: str | None = None,
     version: str = 'VE11P',
     save_prediction: bool | None = False,
     verbose: bool = True,
@@ -41,6 +43,8 @@ def run_pipeline(
         opposedphase_path: Path to the directory containing Dixon Opposed-phase DICOM files.
         umap_path: Path to the directory containing Umap (template) DICOM files.
         output_folder: Path where the resulting MRAC DICOM files will be saved.
+        ct_path: Path to the directory containing original CT DICOM files. 
+            Defaults to None.
         version: Model training version to use (e.g., 'VB20P' or 'VE11P'). 
             Defaults to 'VE11P'.
         save_prediction: If True, saves the resampled volume as 'DeepDixon_QC.nii.gz' 
@@ -97,30 +101,30 @@ def run_pipeline(
         
         print(f"Success! Result saved in: {output_folder}")
 
-        # Calculate metrics
-        metrics_dict = calculate_quality_metrics(
-            sct_path=output_folder,
-            umap_path=f"{tmpdir}/umap_dcm",
-        )
+        if ct_path and os.path.exists(ct_path):
+            # Calculate metrics
+            metrics_dict = calculate_quality_metrics(
+                sct_path=output_folder,
+                ct_path=ct_path,
+            )
 
-        if verbose:
-            print("\n" + "="*30)
-            print(" GLOBAL QUALITY METRICS ")
-            print("="*30)
-            print(f"PSNR: {metrics_dict['PSNR']:.2f}")
-            print(f"SSIM: {metrics_dict['SSIM']:.4f}")
-            
-            for mode in ['tissue', 'bone']:
-                print(f"\n--- {mode.upper()} ANALYSIS ---")
-                print(f"MAE:  {metrics_dict[f'{mode}_MAE']:.4f}")
-                print(f"ME:   {metrics_dict[f'{mode}_ME']:.4f}")
-                print(f"RE:   {metrics_dict[f'{mode}_RE']:.4f}")
-                print(f"ARE:  {metrics_dict[f'{mode}_ARE']:.4f}")
-                print(f"Dice: {metrics_dict[f'{mode}_Dice']:.4f}")
-            print("="*30)
+            if verbose:
+                print("\n" + "="*30)
+                print(" GLOBAL QUALITY METRICS ")
+                print("="*30)
+                print(f"PSNR: {metrics_dict['PSNR']:.2f}")
+                print(f"SSIM: {metrics_dict['SSIM']:.4f}")
+                
+                for mode in ['tissue', 'bone']:
+                    print(f"\n--- {mode.upper()} ANALYSIS ---")
+                    print(f"MAE:  {metrics_dict[f'{mode}_MAE']:.4f}")
+                    print(f"ME:   {metrics_dict[f'{mode}_ME']:.4f}")
+                    print(f"RE:   {metrics_dict[f'{mode}_RE']:.4f}")
+                    print(f"ARE:  {metrics_dict[f'{mode}_ARE']:.4f}")
+                    print(f"Dice: {metrics_dict[f'{mode}_Dice']:.4f}")
+                print("="*30)
 
-        save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='Dixon', output_folder=f"{output_folder}/metrics")
-
+            save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='T1', output_folder=f"{output_folder}/metrics")
 
     finally: 
         # Cleanup
@@ -153,6 +157,12 @@ def main():
         required=True
     )
     parser.add_argument(
+        "--ct_path", 
+        help="Path to folder with dicom files of original CT.", 
+        type=str,
+        required=False,
+    )
+    parser.add_argument(
         "--output_folder", 
         help="Name for output folder. ", 
         type=str,
@@ -167,13 +177,13 @@ def main():
     parser.add_argument(
         "--save_prediction",
         help="If True, saves the resampled volume as DeepT1_QC.nii.gz for quality control. Defaults to False.",
-        type=bool,
+        type=str2bool, 
         default=False
     )
     parser.add_argument(
-        "--verbose",
-        type=bool,
-        default=True,
+        "--verbose", 
+        type=str2bool, 
+        default=False
     )
     args = parser.parse_args()
 
@@ -181,6 +191,7 @@ def main():
         inphase_path=args.inphase_path,
         opposedphase_path=args.opposedphase_path,
         umap_path=args.umap_path,
+        ct_path=args.ct_path,
         output_folder=args.output_folder,
         version=args.version,
         save_prediction=args.save_prediction,
