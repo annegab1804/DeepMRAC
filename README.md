@@ -37,6 +37,7 @@ git clone git@github.com:annegab1804/DeepMRAC.git
 
 Download the models from https://drive.google.com/drive/folders/1WJS7n2torSBFBCCnoJhKN9SalYKSUdlM?usp=sharing and put them in the `models/` folder. 
 It should look like this: 
+```text
 DeepMRAC/
 └── models/
     ├── DeepDixon/
@@ -48,6 +49,7 @@ DeepMRAC/
     └── DeepUTE/
         ├── DeepUTE_VB20P_TF2.h5
         └── DeepUTE_VE11P_model1_TF2.h5
+```
 
 ### 3- Create a Conda environment 
 
