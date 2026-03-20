@@ -122,7 +122,7 @@ Upon completion, the pipeline:
 
 Generates a new DICOM series in the specified output folder.
 
-Plots axial, coronal and sagittal views of hte synthetic CT.
+Plots axial, coronal and sagittal views of the RMI inputs, the predicted sCT, the Umaps and the reference CT if provided.
 
 If a CT is provided, prints quality metrics to the console and appends results to a summary file using Pandas: output/all_metrics.csv.
 
