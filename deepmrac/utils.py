@@ -1,10 +1,11 @@
-import argparse, os, shutil, datetime
+import argparse, os, shutil
 from pathlib import Path
 import numpy as np 
 import pydicom as dicom  
 import nibabel as nib
 import dicom2nifti
 from nilearn.image import resample_img
+from pydicom.uid import generate_uid
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -16,10 +17,11 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
-def sort_files(
+
+def sort_dicomfiles(
     source_folder: str,
     temp_subfolder: str,
-    verbose: bool
+    verbose: bool = False,
 ) -> None:
     """Sorts DICOM files by instance number into a structured temporary directory.
 
@@ -35,6 +37,7 @@ def sort_files(
             subfolder will be created.
         verbose (bool): If True, prints status messages when files are 
             discovered in a subdirectory.
+            Defaults to False.
 
     Raises:
         FileExistsError: If the '{temp_folder}' directory already exists.
@@ -64,6 +67,9 @@ def sort_files(
             except dicom.errors.InvalidDicomError:
                 continue
 
+            if "localizer" in getattr(dcm, "SeriesDescription", "").lower():
+                continue
+
             if not hasattr(dcm, 'InstanceNumber'):
                 raise AttributeError(f"File {f} lacks an 'InstanceNumber' DICOM tag.")
 
@@ -73,10 +79,59 @@ def sort_files(
 
             shutil.copyfile(file_path, dest_path)
 
-def convert_to_nifti(
+def convert_interfile_to_nifti(hdr_path: str, output_nii_path: str) -> None:
+    """Converts an HRRT Interfile volume to a standardized NIfTI image.
+
+    This function parses the .i.hdr text file for dimensions and voxel sizes,
+    reads the corresponding .i binary file, and reorders the data from the 
+    Interfile (Z, Y, X) storage format to a standard NIfTI (X, Y, Z) structure.
+    Finally, it ensures the output is saved in the canonical RAS orientation.
+
+    Args:
+        hdr_path (str): Path to the Interfile header (.i.hdr) file.
+        output_nii_path (str): Full path where the .nii.gz file will be saved.
+
+    Note:
+        The function assumes the Interfile binary data starts at the 
+        Left-Posterior-Inferior corner (LPS/RAS origin) by default.
+    """
+    # Read the header
+    header = {}
+    with open(hdr_path, 'r') as f:
+        for line in f:
+            if ':=' in line:
+                k, v = line.split(':=')
+                header[k.strip().lower()] = v.strip()
+
+    # matrix size [1]=X, [2]=Y, [3]=Z
+    dim = [int(header.get(f'matrix size [{i}]', 0)) for i in [1, 2, 3]]
+    vox_size = [float(header.get(f'scaling factor (mm/pixel) [{i}]', 1.0)) for i in [1, 2, 3]]
+
+    # Load binary data
+    img_path = hdr_path.replace('.i.hdr', '.i')
+    data = np.fromfile(img_path, dtype=np.float32)
+    
+    # IMPORTANT: Reshape to (Z, Y, X) first because that's how Interfile stores it
+    volume_zyx = data.reshape((dim[2], dim[1], dim[0]))
+    volume_zyx = volume_zyx[::-1, ::-1, :]
+
+    # Reorder to (X, Y, Z) for NIfTI standard
+    # This is what allows 'as_closest_canonical' to work later
+    volume_xyz = volume_zyx.transpose(2, 1, 0)
+
+    # Create a standard affine (X, Y, Z)
+    # We assume RAS orientation for HRRT by default
+    affine = np.diag([vox_size[0], vox_size[1], vox_size[2], 1.0])
+    
+    # Save
+    nii_img = nib.Nifti1Image(volume_xyz, affine)
+    nib.save(nii_img, output_nii_path)
+
+
+def convert_dicom_to_nifti(
     dicom_dir: str,
     output_nii: str,
-    verbose: bool
+    verbose: bool = False,
 ) -> None:
     """Converts a DICOM series to a NIfTI image and validates the output.
 
@@ -91,6 +146,7 @@ def convert_to_nifti(
             .nii.gz file will be saved.
         verbose (bool): If True, prints status updates to the console during 
             the conversion process.
+            Defaults to False.
 
     Raises:
         dicom2nifti.exceptions.ConversionError: If the DICOM series is 
@@ -107,7 +163,7 @@ def convert_to_nifti(
     
 def load_and_resample_images(
     nii_image: str,
-    verbose: bool
+    verbose: bool = False,
 ) -> tuple[np.ndarray, nib.nifti1.Nifti1Image]:
     """Loads a NIfTI image and resamples it to a fixed isotropic resolution.
 
@@ -122,6 +178,7 @@ def load_and_resample_images(
         nii_image (str): NIfTI image.
         verbose (bool): If True, prints status updates during the loading 
             and resampling process.
+            Defaults to False.
 
     Returns:
         The resampled NIfTI image object with a 192^3 shape and 
@@ -154,58 +211,70 @@ def load_and_resample_images(
     return data, nii_ref
 
 def resample_to_output_format(
-    pred: np.ndarray,
-    model_ref: nib.nifti1.Nifti1Image,
+    pred_nii: nib.nifti1.Nifti1Image,
     umap_native: nib.nifti1.Nifti1Image,
-    rmi_type: str,
-    verbose: bool = True,
-    save_prediction: bool = False,
+    output_file: str,
+    verbose: bool = False,
 ) -> np.ndarray:
-    """Resample the predicted image back to umap format.
+    """Resample the predicted image back to the native Umap format.
 
-    The function creates a NIfTI object using the reference affine, and
-    performs a linear interpolation to match the native matrix size and
-    voxel resolution of the patient data.
-
-    Important: 'pred' must be re-oriented (flips/swaps reversed) to match 
-    the model_ref.affine orientation BEFORE calling this function.
+    The function aligns the center of the predicted volume with the center of 
+    the native volume in world coordinates to prevent spatial clipping. It 
+    then performs linear interpolation to match the native matrix size and 
+    voxel resolution.
 
     Args:
-        pred (np.ndarray): The 3D predicted image array (192, 192, 192).
-        model_ref (nib.nifti1.Nifti1Image): The NIfTI object used during 
-            the prediction stage.
-        umap_native (nib.nifti1.Nifti1Image): The original DICOM-derived 
-            NIfTI image (Umap) defining the target geometry.
-        rmi_type (str): The name of the method of RMI used (eg.T1, UTE or
-            Dixon).
-        verbose (bool): If True, prints status messages to the console. 
+        pred_nii (nib.nifti1.Nifti1Image): The NIfTI predicted image (e.g., sCT).
+        umap_native (nib.nifti1.Nifti1Image): The original native NIfTI image 
+            defining the target geometry and coordinate system.
+        output_file (str): Path where the resampled NIfTI file will be saved.
+        verbose (bool): If True, prints status and affine matrices to console. 
             Defaults to False.
-        save_prediction (bool): If True, saves the resampled volume as 
-            'DeepT1_QC.nii.gz' for quality control. Defaults to False.
 
     Returns:
-        np.ndarray: The resampled prediction data in the native coordinate 
-            system and resolution.
+        np.ndarray: The resampled data array in the native coordinate system.
     """
-    if verbose: print('Resampling to Umap format')
+    if verbose: print(f"Resampling to Umap format.")
+
+    # Ensure both images are in the same canonical orientation (RAS)
+    pred_nii = nib.as_closest_canonical(pred_nii)
+    umap_native = nib.as_closest_canonical(umap_native)
+
+    # Calculate world coordinates of the center of both volumes
+    # Formula: Affine @ [center_voxel_coords, 1]
+    target_center = umap_native.affine @ np.append(np.array(umap_native.shape[:3]) / 2.0, 1)
+    pred_center = pred_nii.affine @ np.append(np.array(pred_nii.shape[:3]) / 2.0, 1)
     
-    pred_nii = nib.Nifti1Image(pred, model_ref.affine, model_ref.header)
+    # Adjust the translation (4th column) of the prediction affine to match target center
+    # This prevents "black images" caused by coordinate misalignment
+    new_pred_affine = pred_nii.affine.copy()
+    new_pred_affine[:3, 3] += (target_center[:3] - pred_center[:3])
     
-    # Resample using Umap's grid size
+    # Create a temporary NIfTI object with the corrected spatial position
+    pred_nii_aligned = nib.Nifti1Image(pred_nii.get_fdata(), new_pred_affine)
+
+    # Get background value for padding (usually the minimum intensity)
+    data_src = pred_nii.get_fdata()
+    fill_val = float(np.min(data_src))
+
+    # Resampling
     pred_rsl = resample_img(
-        pred_nii,
+        pred_nii_aligned,
         target_affine=umap_native.affine, 
-        target_shape=umap_native.shape,  # Fit Umap matrix
-        interpolation='linear'
+        target_shape=umap_native.shape,
+        interpolation='linear',
     )
 
-    # Save intermediate nii file
-    if save_prediction:
-        if verbose:
-            print(f"Saving QC nii file to Deep{rmi_type}_QC.nii.gz")
-        nib.save(pred_rsl,f'Deep{rmi_type}_QC.nii.gz')
+    # Ensure result is canonical and extract data
+    pred_rsl = nib.as_closest_canonical(pred_rsl)
+    data_rsl = pred_rsl.get_fdata()
+
+    # Saving
+    if verbose:
+        print(f"Saving QC nii file to {output_file}.")
+    nib.save(pred_rsl, output_file)
     
-    return pred_rsl.get_fdata()
+    return data_rsl
 
 def to_dcm(
     DeepX: np.ndarray,
@@ -223,30 +292,69 @@ def to_dcm(
         corresponds to the DICOM InstanceNumber index.
 
     Args:
-        DeepX (np.ndarray): The 3D predicted image array.
+        DeepX (np.ndarray): The 3D predicted image array (Expected shape: RAS).
         dcmcontainer (Path): Path to the folder containing template DICOM files.
         dicomfolder (str): Destination path where the new DICOM series will be saved.
-        rmi_type (str): The name of the method of RMI used (eg.T1, UTE or
-            Dixon).
+        rmi_type (str): The name of the method of RMI used (eg.T1, UTE, Dixon or CT).
+
+    Raises:
+        FileNotFoundError: If the dcmcontainer folder is empty or does not exist.
+        ValueError: If the number of slices in DeepX does not match the number 
+            of DICOM files in dcmcontainer.
+        KeyError: If rmi_type is not one of the expected keys ('T1', 'UTE', 'Dixon', 'CT').
     """
     def listdir_nohidden(path):
         return sorted([f for f in os.listdir(path) if not f.startswith('.')])
     
     # Read first file to get header information
     files = listdir_nohidden(dcmcontainer)
+
     if not files:
         raise FileNotFoundError(f"Template folder {dcmcontainer} is empty !")
-
+    
     ds_template = dicom.dcmread(os.path.join(dcmcontainer, files[0]))
-    pixel_type = ds_template.pixel_array.dtype
+    
+    # ImageOrientationPatient: [cos_r_x, cos_r_y, cos_r_z, cos_c_x, cos_c_y, cos_c_z]
+    iop = ds_template.ImageOrientationPatient
+    row_vec = np.array(iop[3:])
+    col_vec = np.array(iop[:3])
+    slice_vec = np.cross(col_vec, row_vec)
+    print(f"row vec: {row_vec}, col_vec: {col_vec}, slice_vec: {slice_vec}.")
 
-    np_DeepX = np.array(DeepX,dtype=pixel_type)
+    # Determines which NumPy axis (0=X, 1=Y, 2=Z) correspond to which one in DICOM
+    main_axis_row = np.argmax(np.abs(row_vec))
+    main_axis_col = np.argmax(np.abs(col_vec))
+    main_axis_slice = np.argmax(np.abs(slice_vec))
+
+    DeepX = np.flip(DeepX, axis=0) # because RAS = [-LPS_x, -LPS_y, -LPS_z]
+    DeepX = np.flip(DeepX, axis=1) # because RAS = [-LPS_x, -LPS_y, -LPS_z]
+    np_DeepX = np.transpose(DeepX, (main_axis_slice, main_axis_row, main_axis_col))
+
+    if slice_vec[main_axis_slice] < 0:
+        np_DeepX = np.flip(np_DeepX, axis=0)
+
+    # Flip the Rows
+    if row_vec[main_axis_row] < 0: 
+        np_DeepX = np.flip(np_DeepX, axis=1)
+
+    # Flip the Cols
+    if col_vec[main_axis_col] < 0:
+        np_DeepX = np.flip(np_DeepX, axis=2)
+
+    num_files = len(files)
+    num_slices = np_DeepX.shape[0]
+    if num_slices != num_files:
+        raise ValueError(
+            f"Dimension Mismatch: The template folder contains {num_files} DICOM files, "
+            f"but DeepX has {num_slices} slices on axis 0. They must be equal."
+        )
+    
+    pixel_type = ds_template.pixel_array.dtype
+    np_DeepX = np.array(np_DeepX,dtype=pixel_type)
     largest_pixel_value = int(np_DeepX.max())
 
     # Generate unique SeriesInstanceUID
-    now = datetime.datetime.now()
-    uid_stamp = now.strftime("%Y%m%d%H%M%S%f")
-    new_series_uid = f"1.3.12.2.1107.5.2.38.51014.{uid_stamp}.11111.0.0.0"
+    new_series_uid = generate_uid()
 
     if not os.path.exists(dicomfolder):
         os.makedirs(dicomfolder, exist_ok=True)
@@ -254,24 +362,90 @@ def to_dcm(
     # Read each file in UMAP container, replace relevant tags
     for f in files:
         ds = dicom.dcmread(os.path.join(dcmcontainer, f))
+        
+        # Determine the slice index based on the original DICOM InstanceNumber
         i = int(ds.InstanceNumber) - 1
         
-        if i >= np_DeepX.shape[2]:
+        # Skip if the instance number exceeds the available predicted slices
+        if i < 0 or i >= np_DeepX.shape[0]:
             continue
 
+        # Extract the corresponding 2D slice (Y-axis selection)
         slice_data = np_DeepX[i, :, :]
+
         ds.Rows, ds.Columns = slice_data.shape
         ds.LargestImagePixelValue = largest_pixel_value
         ds.PixelData = slice_data.tobytes() 
 
         ds.SeriesInstanceUID = new_series_uid
         ds.SeriesDescription = f"Deep{rmi_type}_Predicted"
-        series_nb_dict = {'T1': '507', 'UTE': '505', 'Dixon': '506'}
+        series_nb_dict = {'T1': '507', 'UTE': '505', 'Dixon': '506', 'CT': '508'}
         ds.SeriesNumber = series_nb_dict[rmi_type]
 
         # Generate unique SOPInstanceUID
-        ds.SOPInstanceUID = f"{new_series_uid}.{i+1}"
+        ds.SOPInstanceUID = generate_uid()
 
         # Save the file
         output_fname = f"dicom_{int(ds.InstanceNumber):04d}.dcm"
         ds.save_as(os.path.join(dicomfolder, output_fname))
+
+def to_interfile(
+    DeepX: np.ndarray,
+    hdr_template: Path,
+    output_path: str,
+    rmi_type: str,
+    verbose: bool = False,
+) -> None:
+    """Creates a new Interfile volume by overwriting a template with predicted data.
+
+    Args:
+        DeepX (np.ndarray): Predicted image array in RAS order.
+        hdr_template (Path): Path to the original .i.hdr file to use as a template.
+        output_path (str): Directory where the new .i.hdr and .i files will be saved.
+        rmi_type (str): Name of the method used (e.g., 'T1', 'CT').
+        verbose (bool): If True, prints status messages to the console. 
+            Defaults to False.
+
+    Raises:
+        FileNotFoundError: If the template header is not found.
+    """
+    if not os.path.exists(output_path):
+        os.makedirs(output_path, exist_ok=True)
+
+    # Prepare file names
+    base_name = f"Deep{rmi_type}_Predicted"
+    new_hdr_path = os.path.join(output_path, f"{base_name}.i.hdr")
+    new_bin_path = os.path.join(output_path, f"{base_name}.i")
+
+    # Update Header Information
+    new_header_lines = []
+    with open(hdr_template, 'r') as f:
+        for line in f:
+            # Update the reference to the binary data file
+            if "name of data file" in line.lower():
+                new_header_lines.append(f"name of data file := {base_name}.i\n")
+            # Update descriptions if needed
+            elif "originating system" in line.lower():
+                new_header_lines.append(f"originating system := DeepMRAC_{rmi_type}\n")
+            else:
+                new_header_lines.append(line)
+
+    # Write the new header
+    with open(new_hdr_path, 'w') as f:
+        f.writelines(new_header_lines)
+
+    # Write Binary Data
+    # IMPORTANT: Ensure DeepX is back in the Interfile storage order (Z, Y, X)
+    # and use the correct float32 type for HRRT.
+    bin_data = DeepX.astype(np.float32)
+    bin_data = np.transpose(bin_data, (2, 1, 0))
+    bin_data = bin_data[::-1, ::-1, :]
+    
+    # Flatten the array to write it as a continuous binary stream
+    bin_data.tofile(new_bin_path)
+
+    if verbose:
+        print(f" Interfile volume created:")
+        print(f"   Header: {new_hdr_path}")
+        print(f"   Binary: {new_bin_path}")
+        print(f"   Final Shape: {DeepX.shape}")
