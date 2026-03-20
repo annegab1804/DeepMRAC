@@ -11,19 +11,21 @@ All versions are implemented for VB20P and VE11P in seperate models.
 
 ## Overview 
 
-The pipeline automates the entire workflow from raw DICOM data to clinical-ready attenuation maps:
+The pipeline provides a fully automated end-to-end workflow, transforming raw anatomical MRI data into clinical-ready PET attenuation maps (sCT):
 
-DICOM Sorting: Organizes raw files by Instance Number.
+DICOM Orchestration: Automatically identifies and organizes raw RMI and Umap (DICOM or Interfile) datasets by Instance Number to ensure spatial continuity.
 
-NIfTI Conversion: Standardizes data using dicom2nifti.
+Standardized Pre-processing: * NIfTI Conversion: Converts vendor-specific DICOM data into a standardized NIfTI format.
 
-Resampling: Isotropic resampling to a 192x192x192 matrix (1.56mm voxels).
+Isotropic Resampling: Resamples data to a unified 192×192×192 matrix (1.56mm isotropic voxels) to match the model's receptive field.
 
-Deep Learning Inference: 3D U-Net prediction using a sliding window (16-slice patches).
+Deep Learning Inference: Executes a 3D U-Net prediction using a sliding window approach (16-slice patches) to generate a synthetic CT (sCT) volume.
 
-DICOM Export: Re-projection to native geometry using the Umap as a header template.
+Clinical Integration: * Inverse Transformation: Reverts the orientation and resamples the prediction back to the native Umap geometry.
 
-Quality Assessment: Automatic calculation of MAE, PSNR, SSIM, and Dice coefficients.
+Header Re-projection: Wraps the predicted volume into the original DICOM/Interfile metadata (template) for seamless PACS or workstation integration.
+
+Quality Assurance: Automatically computes and saves global and tissue-specific metrics (MAE, PSNR, SSIM, and Dice) if a ground-truth CT is provided.
 
 ## Installation
 
@@ -72,7 +74,7 @@ pip install -e .
 
 ## Running the scripts
 
-With the `deepmrac_env` environment activated, you can execute the following CLI commands from any directory.Choose the command corresponding to the model you wish to evaluate:
+With the `deepmrac_env` environment activated, you can execute the following CLI commands from any directory. Choose the command corresponding to the model you wish to evaluate. RMI folder must contrain Dicom files. Umap folder must contain Dicom or Interfile files. Another CT can be provided (as a Dicom folder or directly a NIftI image) if you want to compare the synthetic CT results with it. 
 
 ### T1-weighted (MPRAGE) Model
 
@@ -80,8 +82,8 @@ With the `deepmrac_env` environment activated, you can execute the following CLI
 process-deep-t1 \
     --t1_path your_t1_folder \
     --umap_path your_umap_folder \
+    --ct_path your_ct_path \
     --output_folder output \
-    --save_predictions False \
     --verbose True \
     --version VE11P #could be VB20P
 ```
@@ -94,8 +96,8 @@ process-deep-ute \
     --ute1_path your_ute1_folder \
     --ute2_path your_ute2_folder \
     --umap_path your_umap_folder \
-    --output_folder output \
-    --save_predictions False \
+    --ct_path your_ct_path \
+    --output_folder output 
     --verbose True \
     --version VE11P #could be VB20P
 ```
@@ -107,8 +109,8 @@ process-deep-dixon \
     --inphase_path your_inphase_folder \
     --opposedphase_path your_opposedphase_folder\
     --umap_path your_umap_folder \
+    --ct_path your_ct_path \
     --output_folder output \
-    --save_predictions False \
     --verbose True \
     --version VE11P #could be VB20P
 ```
@@ -120,7 +122,7 @@ Upon completion, the pipeline:
 
 Generates a new DICOM series in the specified output folder.
 
-Prints quality metrics to the console.
+Plots axial, coronal and sagittal views of hte synthetic CT.
 
-Automatically appends results to a summary file using Pandas: output/all_metrics.csv.
+If a CT is provided, prints quality metrics to the console and appends results to a summary file using Pandas: output/all_metrics.csv.
 

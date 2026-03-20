@@ -3,17 +3,20 @@ import tempfile
 import shutil
 import os
 import nibabel as nib
-import numpy as np
 from deepmrac.utils import (
-    sort_files,
-    convert_to_nifti,
+    str2bool,
+    sort_dicomfiles,
+    convert_dicom_to_nifti,
+    convert_interfile_to_nifti,
     load_and_resample_images,
     resample_to_output_format,
     to_dcm,
-    str2bool
+    to_interfile
 )
 from deepmrac.predictions import predict_DeepDixon
 from deepmrac.metrics import calculate_quality_metrics, save_metrics_to_csv
+from deepmrac.plots import plot_comparison
+
 
 def run_pipeline(
     inphase_path: str,
@@ -22,7 +25,6 @@ def run_pipeline(
     output_folder: str,
     ct_path: str | None = None,
     version: str = 'VE11P',
-    save_prediction: bool | None = False,
     verbose: bool = True,
 ) -> None:
     """Executes the DeepDixon pipeline to generate MRAC DICOM files from Dixon and Umap data.
@@ -41,14 +43,12 @@ def run_pipeline(
     Args:
         inphase_path: Path to the directory containing Dixon In-phase DICOM files.
         opposedphase_path: Path to the directory containing Dixon Opposed-phase DICOM files.
-        umap_path: Path to the directory containing Umap (template) DICOM files.
-        output_folder: Path where the resulting MRAC DICOM files will be saved.
-        ct_path: Path to the directory containing original CT DICOM files. 
+        umap_path: Path to the directory containing Umap (template) DICOM or interfile files.
+        output_folder: Path where the resulting MRAC DICOM or interfile files will be saved.
+        ct_path: Path to folder with dicom files or path to the nifti file of original CT.. 
             Defaults to None.
         version: Model training version to use (e.g., 'VB20P' or 'VE11P'). 
             Defaults to 'VE11P'.
-        save_prediction: If True, saves the resampled volume as 'DeepDixon_QC.nii.gz' 
-            for quality control. Defaults to False.
         verbose: If True, prints progress and status messages to the console. 
             Defaults to True.
 
@@ -73,15 +73,33 @@ def run_pipeline(
     tmpdir = tempfile.mkdtemp()
 
     try:
-
         # Sort and convert files into specific folders
-        sort_files(source_folder=inphase_path, temp_subfolder=f"{tmpdir}/inphase_dcm", verbose=verbose )
-        sort_files(source_folder=opposedphase_path, temp_subfolder=f"{tmpdir}/opposedphase_dcm", verbose=verbose )
-        sort_files(source_folder=umap_path, temp_subfolder=f"{tmpdir}/umap_dcm", verbose=verbose )
+        # --- Process Dixon (Standard DICOM) ---
+        sort_dicomfiles(source_folder=inphase_path, temp_subfolder=f"{tmpdir}/inphase_dcm", verbose=verbose )
+        sort_dicomfiles(source_folder=opposedphase_path, temp_subfolder=f"{tmpdir}/opposedphase_dcm", verbose=verbose )
+        convert_dicom_to_nifti(dicom_dir=f"{tmpdir}/inphase_dcm", output_nii=f"{tmpdir}/inphase.nii.gz", verbose=verbose)
+        convert_dicom_to_nifti(dicom_dir=f"{tmpdir}/opposedphase_dcm", output_nii=f"{tmpdir}/opposedphase.nii.gz", verbose=verbose)
 
-        convert_to_nifti(dicom_dir=f"{tmpdir}/inphase_dcm", output_nii=f"{tmpdir}/inphase.nii.gz", verbose=verbose)
-        convert_to_nifti(dicom_dir=f"{tmpdir}/opposedphase_dcm", output_nii=f"{tmpdir}/opposedphase.nii.gz", verbose=verbose)
-        convert_to_nifti(dicom_dir=f"{tmpdir}/umap_dcm", output_nii=f"{tmpdir}/umap.nii.gz", verbose=verbose)
+        # --- Process UMAP (Conditional: DICOM or Interfile) ---
+        # Check if there's an Interfile header in the source folder
+        interfile_headers = [f for f in os.listdir(umap_path) if f.lower().endswith('.i.hdr')]
+
+        if interfile_headers:
+            if verbose:
+                print(f"Detected Interfile format for UMAP in {umap_path}")
+            
+            # We take the first header found
+            hdr_full_path = os.path.join(umap_path, interfile_headers[0])
+
+            convert_interfile_to_nifti(hdr_path=hdr_full_path, output_nii_path=f"{tmpdir}/umap.nii.gz")
+
+        else:
+            if verbose:
+                print(f"Detected DICOM format for UMAP in {umap_path}")
+                
+            # Standard sorting for DICOM files
+            sort_dicomfiles(source_folder=umap_path, temp_subfolder=f"{tmpdir}/umap_dcm", verbose=verbose)
+            convert_dicom_to_nifti(dicom_dir=f"{tmpdir}/umap_dcm", output_nii=f"{tmpdir}/umap.nii.gz", verbose=verbose)
         
         # Load and resample data
         inphase_rsl, inphase_ref = load_and_resample_images(nii_image=f"{tmpdir}/inphase.nii.gz", verbose=verbose)
@@ -91,21 +109,41 @@ def run_pipeline(
         # Predict
         pred = predict_DeepDixon(inphase=inphase_rsl, opposedphase=opposedphase_rsl, version=version)
 
-        # Resample to Umap Format
-        DeepX = np.flip(pred, axis=2)
-        DeepX = resample_to_output_format(pred=DeepX, model_ref=inphase_ref, umap_native=umap_nat, rmi_type="Dixon", verbose=verbose, save_prediction=save_prediction)
-
+        # Resample to Umap Formatos.makedirs(output_folder, exist_ok=True)
+        pred_nii = nib.Nifti1Image(pred, inphase_ref.affine, inphase_ref.header)
+        os.makedirs(output_folder, exist_ok=True)
+        DeepX = resample_to_output_format(pred_nii=pred_nii, umap_native=umap_nat, verbose=verbose, output_file=f"{output_folder}/DeepDixon.nii.gz")
+       
         # Final DICOM (using Umap as container)
-        DeepX = np.transpose(DeepX, (1, 2, 0))
-        to_dcm(DeepX=DeepX, dcmcontainer=f"{tmpdir}/umap_dcm", dicomfolder=output_folder, rmi_type="Dixon")
-        
+        if interfile_headers:
+            to_interfile(DeepX=DeepX, hdr_template=hdr_full_path, output_path=f"{output_folder}/DeepDixon", rmi_type="Dixon")
+        else:
+            to_dcm(DeepX=DeepX, dcmcontainer=f"{tmpdir}/umap_dcm", dicomfolder=f"{output_folder}/DeepDixon", rmi_type="Dixon")
+                
         print(f"Success! Result saved in: {output_folder}")
 
+        ct_nii_path = None
+
         if ct_path and os.path.exists(ct_path):
+            is_nifti = ct_path.lower().endswith(('.nii', '.nii.gz'))
+
+            if is_nifti:
+                if verbose: print(f"Input is already NIfTI: {ct_path}")
+                ct_nii_path = ct_path
+            else:
+                # DICOM files
+                sort_dicomfiles(source_folder=ct_path, temp_subfolder=f"{tmpdir}/ct_dcm", verbose=verbose)
+                convert_dicom_to_nifti(dicom_dir=f"{tmpdir}/ct_dcm", output_nii=f"{tmpdir}/ct.nii.gz", verbose=verbose)
+                ct_nii_path = f'{tmpdir}/ct.nii.gz'
+
+            # Resample using Umap's grid size
+            ct_nat = nib.load(ct_nii_path)
+            ct_rsl = resample_to_output_format(pred_nii=ct_nat, umap_native=umap_nat, verbose=verbose, output_file=f"{output_folder}/CT_resampled.nii.gz")
+
             # Calculate metrics
             metrics_dict = calculate_quality_metrics(
-                sct_path=output_folder,
-                ct_path=ct_path,
+                sct_nii_path=f"{output_folder}/DeepDixon.nii.gz",
+                ct_nii_path=f"{output_folder}/CT_resampled.nii.gz",
             )
 
             if verbose:
@@ -114,7 +152,7 @@ def run_pipeline(
                 print("="*30)
                 print(f"PSNR: {metrics_dict['PSNR']:.2f}")
                 print(f"SSIM: {metrics_dict['SSIM']:.4f}")
-                
+                        
                 for mode in ['tissue', 'bone']:
                     print(f"\n--- {mode.upper()} ANALYSIS ---")
                     print(f"MAE:  {metrics_dict[f'{mode}_MAE']:.4f}")
@@ -124,7 +162,10 @@ def run_pipeline(
                     print(f"Dice: {metrics_dict[f'{mode}_Dice']:.4f}")
                 print("="*30)
 
-            save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='T1', output_folder=f"{output_folder}/metrics")
+            save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='Dixon', output_folder=f"{output_folder}/metrics")
+
+        # Plot
+        plot_comparison(input_path=f"{tmpdir}/inphase.nii.gz", prediction_path=f"{output_folder}/DeepDixon.nii.gz", umap_path=f'{tmpdir}/umap.nii.gz', sct_path=ct_nii_path, model_type="Dixon", output_path=f"{output_folder}/comparison_plot.png")
 
     finally: 
         # Cleanup
@@ -137,7 +178,7 @@ def main():
             claes.noehr.ladefoged@regionh.dk
     Version: March-12-2019
     """
-    parser = argparse.ArgumentParser(description='Predict using DeepUTE.')
+    parser = argparse.ArgumentParser(description='Predict using DeepDixon.')
     parser.add_argument(
         "--inphase_path", 
         help="Path to folder with dicom files of Dixon in-phase.", 
@@ -152,14 +193,15 @@ def main():
     )
     parser.add_argument(
         "--umap_path", 
-        help="Path to folder with dicom files of Umap.", 
+        help="Path to folder with dicom or interphile files of Umap.", 
         type=str,
         required=True
     )
     parser.add_argument(
         "--ct_path", 
-        help="Path to folder with dicom files of original CT.", 
+        help="Path to folder with dicom files or Path to the nifti file of original CT.", 
         type=str,
+        default=None,
         required=False,
     )
     parser.add_argument(
@@ -172,18 +214,14 @@ def main():
         "--version", 
         help="Software version used to train the model (VB20P or VE11P) Default: VE11P. ",
         type=str,
-        default='VE11P'
-    )
-    parser.add_argument(
-        "--save_prediction",
-        help="If True, saves the resampled volume as DeepT1_QC.nii.gz for quality control. Defaults to False.",
-        type=str2bool, 
-        default=False
+        default='VE11P',
+        required=False,
     )
     parser.add_argument(
         "--verbose", 
         type=str2bool, 
-        default=False
+        default=False,
+        required=False,
     )
     args = parser.parse_args()
 
@@ -194,7 +232,6 @@ def main():
         ct_path=args.ct_path,
         output_folder=args.output_folder,
         version=args.version,
-        save_prediction=args.save_prediction,
         verbose=args.verbose
     )
 

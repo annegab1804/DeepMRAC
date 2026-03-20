@@ -6,6 +6,7 @@ import numpy as np
 import dicom2nifti
 import pydicom
 import tempfile
+from typing import Literal
 
 def check_dicom_series(folder: str) -> None:
     """Checks and prints metadata for the first DICOM file in a series.
@@ -32,7 +33,7 @@ def check_dicom_series(folder: str) -> None:
     print(f"Folder: {folder}")
     print(f"  - Description: {ds.SeriesDescription}")
     print(f"  - Modality:    {ds.Modality}")
-    print(f"  - Matrice:     {ds.Rows}x{ds.Columns}")
+    print(f"  - Matrix:     {ds.Rows}x{ds.Columns}")
     print(f"  - Files number: {nb_files}")
     if 'EchoTime' in ds:
         print(f"  - Echo Time: {ds.EchoTime} ms")
@@ -59,7 +60,7 @@ def plot_dicom_file(file: str) -> None:
     print(f"Max value: {data.max()}")
     print(f"Min value: {data.min()}")
     print(f"Mean value: {data.mean()}")
-    print(f"Dimensions : {ds.Rows}x{ds.Columns}")
+    print(f"Shape : {ds.Rows}x{ds.Columns}")
     
     plt.imshow(data, cmap='gray')
     plt.title(f"Slice {ds.InstanceNumber} - {ds.SeriesDescription}")
@@ -99,14 +100,14 @@ def scan_dicom_folder_for_data(folder: str) -> None:
     if valid_files_count > 0:
         print(f"Result : {valid_files_count}/{len(files)} files have data.")
     else:
-        print("Results : No data found in any of the files.")
+        print("Result : No data found in any of the files.")
 
 def plot_3d_views(
     volume: np.ndarray,
     aspects: dict | None = None,
     rotation_map: dict | None = None,
     flip_map: dict | None = None,
-    window: str | tuple = 'auto'
+    window: str | tuple[float, float] = 'auto'
 ) -> None:
     """Plots 3D orthogonal views from a pre-loaded NumPy volume.
 
@@ -184,11 +185,13 @@ def plot_3d_views(
     plt.tight_layout()
     plt.show()
 
-def extracts_nifti_volume_and_aspects(img_nii: nib.nifti1.Nifti1Image) -> tuple[np.ndarray, dict[str, float]]:
+def extracts_nifti_volume_and_aspects(img_nii: nib.nifti1.Nifti1Image, verbose: bool = False) -> tuple[np.ndarray, dict[str, float]]:
     """Standardizes a NIfTI image to RAS orientation and extracts volume/aspect ratios.
 
     Args:
         img_nii (nib.nifti1.Nifti1Image): The input NIfTI image object.
+        verbose(bool, optional): If True print the spacing and the final volume shape.
+            Defaults to False.
 
     Returns:
         tuple[np.ndarray, dict[str, float]]: A tuple containing:
@@ -205,8 +208,9 @@ def extracts_nifti_volume_and_aspects(img_nii: nib.nifti1.Nifti1Image) -> tuple[
     # Extract voxel spacing (mm) from the header
     dx, dy, dz = canonical_img.header.get_zooms()[:3]
 
-    print(f"Standardized Spacing (RAS): dx={dx:.2f}, dy={dy:.2f}, dz={dz:.2f}")
-    print(f"Final Volume Shape (ZYX): {volume.shape}")
+    if verbose:
+        print(f"Standardized Spacing (RAS): dx={dx:.2f}, dy={dy:.2f}, dz={dz:.2f}")
+        print(f"Final Volume Shape (ZYX): {volume.shape}")
 
     # Calculate aspect ratios for visualization (Matplotlib/Napari)
     aspects = {
@@ -299,32 +303,74 @@ def load_interfile_volume_and_aspects(hdr_path: str) -> tuple[np.ndarray, dict[s
     nii_img = nib.Nifti1Image(volume_xyz, affine)
     return extracts_nifti_volume_and_aspects(nii_img)
 
+def plot_comparison(
+    input_path: str, 
+    prediction_path: str, 
+    umap_path: str,
+    model_type: Literal['T1', 'UTE', 'Dixon'] = 'T1',
+    sct_path: str | None  = None,
+    output_path: str | None = None
+) -> None:
+    """Generates a comparison plot for DeepT1, DeepUTE, or DeepDixon models.
 
-def plot_comparison(T1_path: str, DeepT1_path: str, sCT_path: str, umap_path: str):
-    paths = [T1_path, DeepT1_path, sCT_path, umap_path]
-    names = ["T1-Weighted MPRAGE", "DeepT1", "sCT for Website", "Umap"]
+    Args:
+        input_path: Path to the main input (T1, UTE Echo 1, or Dixon In-phase).
+        prediction_path: Path to the DL model's prediction NIfTI file.
+        umap_path: Path to the Umap template NIfTI file.
+        model_type: Type of model to adapt labels ('T1', 'UTE', or 'Dixon'). 
+            Defaults to 'T1'.
+        sct_path: Optional path to a reference sCT. Defaults to None.
+        output_path: Optional path to save the resulting figure. Defaults to None.
+
+    Returns:
+        None. Displays and optionally saves the comparison grid.
+    """
+    # Mapping of model types to their specific input names
+    input_names = {
+        'T1': "T1-Weighted",
+        'UTE': "UTE Echo 1",
+        'Dixon': "Dixon In-phase"
+    }
+    
+    model_name = f"Deep{model_type}"
+    main_input_label = input_names.get(model_type, "Input MRI")
+
+    # Build lists dynamically
+    paths = [input_path, prediction_path, umap_path]
+    names = [main_input_label, model_name, "Umap"]
+    
+    if sct_path:
+        # Insert reference sCT before Umap for direct visual comparison
+        paths.insert(2, sct_path)
+        names.insert(2, "sCT Reference")
+        
     planes = ['axial', 'coronal', 'sagittal']
+    num_cols = len(paths)
     
-    # Figure : 3 lignes (Vues) x 4 colonnes (Modèles)
-    fig, axes = plt.subplots(len(planes), len(names), figsize=(18, 12))
+    fig, axes = plt.subplots(len(planes), num_cols, figsize=(4 * num_cols, 12))
     
+    # Handle single column case for matplotlib consistency
+    if num_cols == 1:
+        axes = axes[:, np.newaxis]
+
     for col_idx, (path, name) in enumerate(zip(paths, names)):
         volume, aspects = load_nifti_volume_and_aspects(path)
         
-        # Extraction des coupes centrales
+        # Central slices (Z, Y, X)
         z_mid, y_mid, x_mid = np.array(volume.shape) // 2
+        
         views_data = {
             'axial': volume[z_mid, :, :],
             'coronal': volume[:, y_mid, :],
             'sagittal': volume[:, :, x_mid]
         }
         
+        # Contrast normalization
         vmin, vmax = np.percentile(volume, [1, 99])
 
         for row_idx, plane in enumerate(planes):
             ax = axes[row_idx, col_idx]
             
-            # Affichage de la coupe
             ax.imshow(
                 views_data[plane], 
                 cmap='gray', 
@@ -334,18 +380,20 @@ def plot_comparison(T1_path: str, DeepT1_path: str, sCT_path: str, umap_path: st
                 origin='lower'
             )
             
-            # Titres des colonnes (Noms des modèles) sur la première ligne
             if row_idx == 0:
                 ax.set_title(name, fontsize=14, fontweight='bold', pad=15)
-            
-            # Labels des lignes (Noms des vues) sur la première colonne
             if col_idx == 0:
                 ax.set_ylabel(plane.capitalize(), fontsize=14, fontweight='bold')
             
-            # Nettoyage des axes pour un look "publication"
             ax.set_xticks([])
             ax.set_yticks([])
 
     plt.tight_layout()
-    plt.subplots_adjust(wspace=0.05, hspace=0.05) # Réduit l'espace vide entre les images
+    plt.subplots_adjust(wspace=0.05, hspace=0.05) 
+
+    if output_path:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True) if os.path.dirname(output_path) else None
+        plt.savefig(output_path, bbox_inches='tight', dpi=300)
+        print(f"Plot saved to: {output_path}")
+
     plt.show()

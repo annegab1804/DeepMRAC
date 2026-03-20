@@ -16,7 +16,8 @@ from deepmrac.utils import (
 )
 from deepmrac.predictions import predict_DeepT1
 from deepmrac.metrics import calculate_quality_metrics, save_metrics_to_csv
-from deepmrac.plots import plot_3d_views, load_nifti_volume_and_aspects
+from deepmrac.plots import plot_comparison
+
 
 def run_pipeline(
     t1_path: str,
@@ -42,12 +43,10 @@ def run_pipeline(
         t1_path: Path to the directory containing T1-weighted MPRAGE DICOM files.
         umap_path: Path to the directory containing Umap DICOM or interfile files.
         output_folder: Path where the resulting MRAC DICOM files will be saved.
-        ct_path: Path to the directory containing original CT DICOM files. 
+        ct_path: Path to folder with dicom files or Path to the nifti file of original CT. 
             Defaults to None.
         version: Model training version to use (e.g., 'VB20P' or 'VE11P'). 
             Defaults to 'VE11P'.
-        save_prediction: If True, saves the resampled volume as 'DeepT1_QC.nii.gz' 
-            for quality control. Defaults to False.
         verbose: If True, prints progress and status messages to the console. 
             Defaults to True.
 
@@ -112,61 +111,50 @@ def run_pipeline(
         # Flip back to the original orientation
         pred = np.swapaxes(np.flipud(pred), 2, 0)
 
-        # Resample to Umap Formatos.makedirs(output_folder, exist_ok=True)
+        # Resample to Umap Format
         pred_nii = nib.Nifti1Image(pred, t1_ref.affine, t1_ref.header)
         os.makedirs(output_folder, exist_ok=True)
         DeepX = resample_to_output_format(pred_nii=pred_nii, umap_native=umap_nat, verbose=verbose, output_file=f"{output_folder}/DeepT1.nii.gz")
        
         # Final DICOM (using Umap as container)
         if interfile_headers:
-            to_interfile(DeepX=DeepX, hdr_template=hdr_full_path, output_path=f"{output_folder}/sCT", rmi_type="T1")
+            to_interfile(DeepX=DeepX, hdr_template=hdr_full_path, output_path=f"{output_folder}/DeepT1", rmi_type="T1")
         else:
-            to_dcm(DeepX=DeepX, dcmcontainer=f"{tmpdir}/umap_dcm", dicomfolder=f"{output_folder}/sCT", rmi_type="T1")
+            to_dcm(DeepX=DeepX, dcmcontainer=f"{tmpdir}/umap_dcm", dicomfolder=f"{output_folder}/DeepT1", rmi_type="T1")
                 
         print(f"Success! Result saved in: {output_folder}")
 
-        # Plot
-        volume, aspects = load_nifti_volume_and_aspects(nifti_path=f"{output_folder}/DeepT1.nii.gz")
-        plot_3d_views(volume=volume, aspects=aspects, rotation_map=None, flip_map=None)
-
+        ct_nii_path = None
 
         if ct_path and os.path.exists(ct_path):
             is_nifti = ct_path.lower().endswith(('.nii', '.nii.gz'))
 
             if is_nifti:
                 if verbose: print(f"Input is already NIfTI: {ct_path}")
-                ct_nat = nib.load(ct_path)
+                ct_nii_path = ct_path
             else:
                 # DICOM files
                 sort_dicomfiles(source_folder=ct_path, temp_subfolder=f"{tmpdir}/ct_dcm", verbose=verbose)
                 convert_dicom_to_nifti(dicom_dir=f"{tmpdir}/ct_dcm", output_nii=f"{tmpdir}/ct.nii.gz", verbose=verbose)
-                ct_nat = nib.load(f'{tmpdir}/ct.nii.gz')
-            
+                ct_nii_path = f'{tmpdir}/ct.nii.gz'
 
             # Resample using Umap's grid size
+            ct_nat = nib.load(ct_nii_path)
             ct_rsl = resample_to_output_format(pred_nii=ct_nat, umap_native=umap_nat, verbose=verbose, output_file=f"{output_folder}/CT_resampled.nii.gz")
-
-            # Make sure we have the same units as the sCT (min=0)
-            ct_final_data = np.clip(ct_rsl, a_min=-1000, a_max=None)
-            ct_final_data = ct_final_data + 1000
-
-            # Final DICOM (using Umap as container)
-            ct_final_data = np.transpose(ct_final_data, (1, 2, 0))
-
-            to_dcm(DeepX=ct_final_data, dcmcontainer=f"{tmpdir}/umap_dcm",  dicomfolder=f"{output_folder}/CT", rmi_type="CT")
 
             # Calculate metrics
             metrics_dict = calculate_quality_metrics(
-                sct_path=f"{output_folder}/sCT",
-                ct_path=f"{output_folder}/CT",
+                sct_nii_path=f"{output_folder}/DeepT1.nii.gz",
+                ct_nii_path=f"{output_folder}/CT_resampled.nii.gz",
             )
+
             if verbose:
                 print("\n" + "="*30)
                 print(" GLOBAL QUALITY METRICS ")
                 print("="*30)
                 print(f"PSNR: {metrics_dict['PSNR']:.2f}")
                 print(f"SSIM: {metrics_dict['SSIM']:.4f}")
-                
+                        
                 for mode in ['tissue', 'bone']:
                     print(f"\n--- {mode.upper()} ANALYSIS ---")
                     print(f"MAE:  {metrics_dict[f'{mode}_MAE']:.4f}")
@@ -177,6 +165,9 @@ def run_pipeline(
                 print("="*30)
 
             save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='T1', output_folder=f"{output_folder}/metrics")
+        
+        # Plot
+        plot_comparison(input_path=f"{tmpdir}/t1.nii.gz", prediction_path=f"{output_folder}/DeepT1.nii.gz", umap_path=f'{tmpdir}/umap.nii.gz', sct_path=ct_nii_path, model_type="T1", output_path=f"{output_folder}/comparison_plot.png")
 
     finally:
         shutil.rmtree(tmpdir)
@@ -187,7 +178,7 @@ def main():
             claes.noehr.ladefoged@regionh.dk
     Version: August-20-2019
     """
-    parser = argparse.ArgumentParser(description='Predict using DeepDixon.')
+    parser = argparse.ArgumentParser(description='Predict using DeepT1.')
     parser.add_argument(
         "--t1_path", 
         help="Path to folder with dicom files of T1 weighted MPRAGE.", 
@@ -202,8 +193,9 @@ def main():
     )
     parser.add_argument(
         "--ct_path", 
-        help="Path to folder with dicom files of original CT.", 
+        help="Path to folder with dicom files or Path to the nifti file of original CT.", 
         type=str,
+        default=None,
         required=False,
     )
     parser.add_argument(
@@ -216,12 +208,14 @@ def main():
         "--version", 
         help="Software version used to train the model (VB20P or VE11P) Default: VE11P. ",
         type=str,
-        default='VE11P'
+        default='VE11P',
+        required=False,
     )
     parser.add_argument(
         "--verbose", 
         type=str2bool, 
-        default=False
+        default=False,
+        required=False,
     )
     args = parser.parse_args()
 
