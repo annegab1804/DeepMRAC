@@ -319,7 +319,6 @@ def to_dcm(
     row_vec = np.array(iop[3:])
     col_vec = np.array(iop[:3])
     slice_vec = np.cross(col_vec, row_vec)
-    print(f"row vec: {row_vec}, col_vec: {col_vec}, slice_vec: {slice_vec}.")
 
     # Determines which NumPy axis (0=X, 1=Y, 2=Z) correspond to which one in DICOM
     main_axis_row = np.argmax(np.abs(row_vec))
