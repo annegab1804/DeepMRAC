@@ -15,7 +15,7 @@ def check_dicom_series(folder: str) -> None:
     key DICOM attributes such as Series Description, Modality, and Matrix size.
 
     Args:
-        folder: The path to the directory containing DICOM files.
+        folder (str): The path to the directory containing DICOM files.
 
     Returns:
         None
@@ -49,7 +49,7 @@ def plot_dicom_file(file: str) -> None:
     before rendering the grayscale image.
 
     Args:
-        file: The file path to the DICOM image.
+        file (str): The file path to the DICOM image.
 
     Returns:
         None
@@ -73,7 +73,7 @@ def scan_dicom_folder_for_data(folder: str) -> None:
     maximum pixel intensity is greater than zero to identify "valid" data.
 
     Args:
-        folder: The path to the directory to scan.
+        folder (str): The path to the directory to scan.
 
     Returns:
         None
@@ -107,7 +107,6 @@ def plot_3d_views(
     aspects: dict | None = None,
     rotation_map: dict | None = None,
     flip_map: dict | None = None,
-    window: str | tuple[float, float] = 'auto'
 ) -> None:
     """Plots 3D orthogonal views from a pre-loaded NumPy volume.
 
@@ -152,19 +151,7 @@ def plot_3d_views(
         if plane in flip_map:
             views[plane] = np.flip(views[plane], axis=flip_map[plane])
 
-    if window == 'auto':
-        # On utilise les percentiles pour ignorer les extrêmes (très efficace pour HU négatifs)
-        vmin, vmax = np.percentile(volume, [0.5, 99.5])
-    elif window == 'soft_tissue':
-        # Fenêtre standard radiologue : Centre 40, Largeur 400
-        vmin, vmax = -160, 240
-    elif window == 'bone':
-        # Fenêtre pour voir l'os : Centre 400, Largeur 1800
-        vmin, vmax = -500, 1300
-    elif isinstance(window, tuple):
-        vmin, vmax = window
-    else:
-        vmin, vmax = volume.min(), volume.max()
+    vmin, vmax = np.percentile(volume, [0.5, 99.5])
 
     # Plotting
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -175,17 +162,19 @@ def plot_3d_views(
             cmap='gray', 
             aspect=aspects.get(plane, 1.0), 
             origin='lower',
-            vmin=vmin,  # IMPORTANT : fixe le noir
-            vmax=vmax   # IMPORTANT : fixe le blanc
+            vmin=vmin,
+            vmax=vmax
         )
         axes[i].set_title(f"{plane.capitalize()} view")
-        #axes[i].imshow(views[plane], cmap='gray', aspect=aspects.get(plane, 1.0), vmin=vmin, vmax=vmax)
         axes[i].axis('off')
 
     plt.tight_layout()
     plt.show()
 
-def extracts_nifti_volume_and_aspects(img_nii: nib.nifti1.Nifti1Image, verbose: bool = False) -> tuple[np.ndarray, dict[str, float]]:
+def extracts_nifti_volume_and_aspects(
+    img_nii: nib.nifti1.Nifti1Image,
+    verbose: bool = False
+) -> tuple[np.ndarray, dict[str, float]]:
     """Standardizes a NIfTI image to RAS orientation and extracts volume/aspect ratios.
 
     Args:
@@ -263,7 +252,7 @@ def load_interfile_volume_and_aspects(hdr_path: str) -> tuple[np.ndarray, dict[s
     scaling factors, then reads the corresponding binary file (.i).
 
     Args:
-        hdr_path: Path to the .i.hdr file.
+        hdr_path (str): Path to the .i.hdr file.
 
     Returns:
         A tuple containing:
@@ -314,13 +303,15 @@ def plot_comparison(
     """Generates a comparison plot for DeepT1, DeepUTE, or DeepDixon models.
 
     Args:
-        input_path: Path to the main input (T1, UTE Echo 1, or Dixon In-phase).
-        prediction_path: Path to the DL model's prediction NIfTI file.
-        umap_path: Path to the Umap template NIfTI file.
-        model_type: Type of model to adapt labels ('T1', 'UTE', or 'Dixon'). 
+        input_path (str): Path to the main input (T1, UTE Echo 1, or Dixon In-phase).
+        prediction_path (str): Path to the DL model's prediction NIfTI file.
+        umap_path (str): Path to the Umap template NIfTI file.
+        model_type (str, optional): Type of model to adapt labels ('T1', 'UTE', or 'Dixon'). 
             Defaults to 'T1'.
-        sct_path: Optional path to a reference sCT. Defaults to None.
-        output_path: Optional path to save the resulting figure. Defaults to None.
+        sct_path (str, optional): Optional path to a reference sCT.
+            Defaults to None.
+        output_path (str, optional): Optional path to save the resulting figure.
+            Defaults to None.
 
     Returns:
         None. Displays and optionally saves the comparison grid.

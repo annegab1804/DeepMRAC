@@ -25,7 +25,7 @@ def run_pipeline(
     umap_path: str,
     output_folder: str,
     ct_path: str | None = None,
-    ct_kvp: int | None = None,
+    ct_kvp: int = 120,
     version: str = 'VE11P',
     verbose: bool = True,
 ) -> None:
@@ -49,7 +49,7 @@ def run_pipeline(
         ct_path (str, optional): Path to folder with dicom files or Path to the nifti file of original CT.
             Defaults to None.
         ct_kvp (int, optional): x-ray tube voltages of the CT scanner (kvp).
-            Defaults to None.
+            Defaults to 120.
         version (str, optional): Model training version to use (e.g., 'VB20P' or 'VE11P'). 
             Defaults to 'VE11P'.
         verbose (bool, optional): If True, prints progress and status messages to the console. 
@@ -214,7 +214,7 @@ def main():
         "--ct_kvp", 
         help="X-ray tube voltages of the original CT scanner (kvp).", 
         type=int,
-        default=None,
+        default=120,
         required=False,
     )
     parser.add_argument(
