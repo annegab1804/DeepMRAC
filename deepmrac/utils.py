@@ -210,12 +210,13 @@ def load_and_resample_images(
     # Return nii handles as well as new image
     return data, nii_ref
 
+
 def resample_to_output_format(
     pred_nii: nib.nifti1.Nifti1Image,
     umap_native: nib.nifti1.Nifti1Image,
-    output_file: str,
+    output_file: str | None = None,
     verbose: bool = False,
-) -> np.ndarray:
+) -> nib.nifti1.Nifti1Image:
     """Resample the predicted image back to the native Umap format.
 
     The function aligns the center of the predicted volume with the center of 
@@ -227,12 +228,13 @@ def resample_to_output_format(
         pred_nii (nib.nifti1.Nifti1Image): The NIfTI predicted image (e.g., sCT).
         umap_native (nib.nifti1.Nifti1Image): The original native NIfTI image 
             defining the target geometry and coordinate system.
-        output_file (str): Path where the resampled NIfTI file will be saved.
-        verbose (bool): If True, prints status and affine matrices to console. 
+        output_file (str, optional): Path where the resampled NIfTI file will be saved.
+            Defaults to None.
+        verbose (bool, optional): If True, prints status and affine matrices to console. 
             Defaults to False.
 
     Returns:
-        np.ndarray: The resampled data array in the native coordinate system.
+        nib.nifti1.Nifti1Image: The resampled NIftI in the native coordinate system.
     """
     if verbose: print(f"Resampling to Umap format.")
 
@@ -263,21 +265,77 @@ def resample_to_output_format(
         target_affine=umap_native.affine, 
         target_shape=umap_native.shape,
         interpolation='linear',
+        fill_value=0
     )
 
     # Ensure result is canonical and extract data
     pred_rsl = nib.as_closest_canonical(pred_rsl)
-    data_rsl = pred_rsl.get_fdata()
 
     # Saving
-    if verbose:
-        print(f"Saving QC nii file to {output_file}.")
-    nib.save(pred_rsl, output_file)
+    if output_file:
+        if verbose:
+            print(f"Saving QC nii file to {output_file}.")
+        nib.save(pred_rsl, output_file)
     
-    return data_rsl
+    return pred_rsl
+
+def transform_ct_to_mu511(
+    nifti_input: nib.nifti1.Nifti1Image,
+    kvp: int = 120,
+    verbose: bool = False
+) -> nib.nifti1.Nifti1Image:
+    """Transform a CT (HU) into a umap (mu 511 keV).
+
+    Used the method from Carney, J.P.J., Townsend, D.W., Rappoport, V. and Bendriem,
+    B. (2006), Method for transforming CT images for attenuation correction in PET/CT imaging.
+    Med. Phys., 33: 976-983. https://doi.org/10.1118/1.2174132 . 
+    
+    Args:
+        nifti_file (nib.nifti1.Nifti1Image): NIftI image.
+        kvp (int, optional): x-ray tube voltages of the CT scanner.
+            Defaults to 120.
+        verbose (bool, optionale): If true print validation message.
+            Default to False.
+
+    Returns:
+        nib.nifti1.Nifti1Image: The CT NIftI image rescaled to umap's values.
+    """
+    data = nifti_input.get_fdata().astype(np.float32)
+
+    values_dict = {
+        "80": {"a": 3.64e-5, "b": 6.26e-2, "BP": 1050},
+        "100": {"a": 4.43e-5, "b": 5.44e-2, "BP": 1052},
+        "110": {"a": 4.92e-5, "b": 4.88e-2, "BP": 1043},
+        "120": {"a": 5.10e-5, "b": 4.71e-2, "BP": 1047},
+        "130": {"a": 5.51e-5, "b": 4.24e-2, "BP": 1037},
+        "140": {"a": 5.64e-5, "b": 4.08e-2, "BP": 1030}
+    }
+
+    params = values_dict[str(kvp)]
+    a = params["a"]
+    b = params["b"]
+    bp = params["BP"]
+
+    hu_shifted = data + 1000
+    mu_map = np.zeros_like(data)
+
+    # 1st case : Below the Breakpoint (Soft tissues)
+    mask_low = hu_shifted < bp
+    mu_map[mask_low] = 9.6e-5 * hu_shifted[mask_low]
+    
+    # 2nd case : Bones
+    mask_high = hu_shifted >= bp
+    mu_map[mask_high] = a * hu_shifted[mask_high] + b
+
+    new_img = nib.Nifti1Image(mu_map, nifti_input.affine, nifti_input.header)
+
+    if verbose:
+        print(f"Transformed CT image to umap values.")
+
+    return new_img
 
 def to_dcm(
-    DeepX: np.ndarray,
+    DeepX_nii: nib.nifti1.Nifti1Image,
     dcmcontainer: Path,
     dicomfolder: str,
     rmi_type: str,
@@ -292,7 +350,7 @@ def to_dcm(
         corresponds to the DICOM InstanceNumber index.
 
     Args:
-        DeepX (np.ndarray): The 3D predicted image array (Expected shape: RAS).
+        DeepX_nii (nib.nifti1.Nifti1Image): The 3D predicted NIftI image (Expected shape: RAS).
         dcmcontainer (Path): Path to the folder containing template DICOM files.
         dicomfolder (str): Destination path where the new DICOM series will be saved.
         rmi_type (str): The name of the method of RMI used (eg.T1, UTE, Dixon or CT).
@@ -306,6 +364,8 @@ def to_dcm(
     def listdir_nohidden(path):
         return sorted([f for f in os.listdir(path) if not f.startswith('.')])
     
+    DeepX = DeepX_nii.get_fdata()
+
     # Read first file to get header information
     files = listdir_nohidden(dcmcontainer)
 
@@ -389,7 +449,7 @@ def to_dcm(
         ds.save_as(os.path.join(dicomfolder, output_fname))
 
 def to_interfile(
-    DeepX: np.ndarray,
+    DeepX_nii: nib.nifti1.Nifti1Image,
     hdr_template: Path,
     output_path: str,
     rmi_type: str,
@@ -398,7 +458,7 @@ def to_interfile(
     """Creates a new Interfile volume by overwriting a template with predicted data.
 
     Args:
-        DeepX (np.ndarray): Predicted image array in RAS order.
+        DeepX_nii (nib.nifti1.Nifti1Image): Predicted NIftI Image in RAS order.
         hdr_template (Path): Path to the original .i.hdr file to use as a template.
         output_path (str): Directory where the new .i.hdr and .i files will be saved.
         rmi_type (str): Name of the method used (e.g., 'T1', 'CT').
@@ -436,6 +496,7 @@ def to_interfile(
     # Write Binary Data
     # IMPORTANT: Ensure DeepX is back in the Interfile storage order (Z, Y, X)
     # and use the correct float32 type for HRRT.
+    DeepX = DeepX_nii.get_fdata()
     bin_data = DeepX.astype(np.float32)
     bin_data = np.transpose(bin_data, (2, 1, 0))
     bin_data = bin_data[::-1, ::-1, :]

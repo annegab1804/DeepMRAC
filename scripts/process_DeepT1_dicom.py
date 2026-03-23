@@ -12,7 +12,8 @@ from deepmrac.utils import (
     load_and_resample_images,
     resample_to_output_format,
     to_dcm,
-    to_interfile
+    to_interfile,
+    transform_ct_to_mu511
 )
 from deepmrac.predictions import predict_DeepT1
 from deepmrac.metrics import calculate_quality_metrics, save_metrics_to_csv
@@ -24,6 +25,7 @@ def run_pipeline(
     umap_path: str,
     output_folder: str,
     ct_path: str | None = None,
+    ct_kvp: int | None = None,
     version: str | None = 'VE11P',
     verbose: bool | None = True,
 ):
@@ -40,14 +42,16 @@ def run_pipeline(
     and prints quality metrics (MAE, PSNR, SSIM, Dice).
 
     Args:
-        t1_path: Path to the directory containing T1-weighted MPRAGE DICOM files.
-        umap_path: Path to the directory containing Umap DICOM or interfile files.
-        output_folder: Path where the resulting MRAC DICOM files will be saved.
-        ct_path: Path to folder with dicom files or Path to the nifti file of original CT. 
+        t1_path (str): Path to the directory containing T1-weighted MPRAGE DICOM files.
+        umap_path (str): Path to the directory containing Umap DICOM or interfile files.
+        output_folder (str): Path where the resulting MRAC DICOM files will be saved.
+        ct_path (str, optional): Path to folder with dicom files or Path to the nifti file of original CT. 
             Defaults to None.
-        version: Model training version to use (e.g., 'VB20P' or 'VE11P'). 
+        ct_kvp (int, optional): x-ray tube voltages of the CT scanner (kvp).
+            Defaults to None.
+        version (str, optional): Model training version to use (e.g., 'VB20P' or 'VE11P'). 
             Defaults to 'VE11P'.
-        verbose: If True, prints progress and status messages to the console. 
+        verbose (bool, optional): If True, prints progress and status messages to the console. 
             Defaults to True.
 
     Returns:
@@ -110,37 +114,39 @@ def run_pipeline(
 
         # Flip back to the original orientation
         pred = np.swapaxes(np.flipud(pred), 2, 0)
+        pred = pred / 10000 # convert back to umap's units
 
         # Resample to Umap Format
         pred_nii = nib.Nifti1Image(pred, t1_ref.affine, t1_ref.header)
         os.makedirs(output_folder, exist_ok=True)
-        DeepX = resample_to_output_format(pred_nii=pred_nii, umap_native=umap_nat, verbose=verbose, output_file=f"{output_folder}/DeepT1.nii.gz")
+        DeepX_nii = resample_to_output_format(pred_nii=pred_nii, umap_native=umap_nat, verbose=verbose, output_file=f"{output_folder}/DeepT1.nii.gz")
        
         # Final DICOM (using Umap as container)
         if interfile_headers:
-            to_interfile(DeepX=DeepX, hdr_template=hdr_full_path, output_path=f"{output_folder}/DeepT1", rmi_type="T1")
+            to_interfile(DeepX_nii=DeepX_nii, hdr_template=hdr_full_path, output_path=f"{output_folder}/DeepT1", rmi_type="T1")
         else:
-            to_dcm(DeepX=DeepX, dcmcontainer=f"{tmpdir}/umap_dcm", dicomfolder=f"{output_folder}/DeepT1", rmi_type="T1")
+            to_dcm(DeepX_nii=DeepX_nii, dcmcontainer=f"{tmpdir}/umap_dcm", dicomfolder=f"{output_folder}/DeepT1", rmi_type="T1")
                 
         print(f"Success! Result saved in: {output_folder}")
 
-        ct_nii_path = None
+        ct_nii_resampled_path = None
 
         if ct_path and os.path.exists(ct_path):
             is_nifti = ct_path.lower().endswith(('.nii', '.nii.gz'))
 
             if is_nifti:
                 if verbose: print(f"Input is already NIfTI: {ct_path}")
-                ct_nii_path = ct_path
+                ct_nat = nib.load(ct_path)
             else:
                 # DICOM files
                 sort_dicomfiles(source_folder=ct_path, temp_subfolder=f"{tmpdir}/ct_dcm", verbose=verbose)
                 convert_dicom_to_nifti(dicom_dir=f"{tmpdir}/ct_dcm", output_nii=f"{tmpdir}/ct.nii.gz", verbose=verbose)
-                ct_nii_path = f'{tmpdir}/ct.nii.gz'
+                ct_nat = nib.load(f'{tmpdir}/ct.nii.gz')
 
             # Resample using Umap's grid size
-            ct_nat = nib.load(ct_nii_path)
-            ct_rsl = resample_to_output_format(pred_nii=ct_nat, umap_native=umap_nat, verbose=verbose, output_file=f"{output_folder}/CT_resampled.nii.gz")
+            ct_nat = transform_ct_to_mu511(ct_nat, kvp=ct_kvp)
+            ct_nii_resampled_path = f"{output_folder}/CT_resampled.nii.gz"
+            ct_rsl = resample_to_output_format(pred_nii=ct_nat, umap_native=umap_nat, verbose=verbose, output_file=ct_nii_resampled_path)
 
             # Calculate metrics
             metrics_dict = calculate_quality_metrics(
@@ -167,7 +173,7 @@ def run_pipeline(
             save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='T1', output_folder=f"{output_folder}/metrics")
         
         # Plot
-        plot_comparison(input_path=f"{tmpdir}/t1.nii.gz", prediction_path=f"{output_folder}/DeepT1.nii.gz", umap_path=f'{tmpdir}/umap.nii.gz', sct_path=ct_nii_path, model_type="T1", output_path=f"{output_folder}/comparison_plot.png")
+        plot_comparison(input_path=f"{tmpdir}/t1.nii.gz", prediction_path=f"{output_folder}/DeepT1.nii.gz", umap_path=f'{tmpdir}/umap.nii.gz', sct_path=ct_nii_resampled_path, model_type="T1", output_path=f"{output_folder}/comparison_plot.png")
 
     finally:
         shutil.rmtree(tmpdir)
@@ -199,6 +205,13 @@ def main():
         required=False,
     )
     parser.add_argument(
+        "--ct_kvp", 
+        help="X-ray tube voltages of the original CT scanner (kvp).", 
+        type=int,
+        default=None,
+        required=False,
+    )
+    parser.add_argument(
         "--output_folder", 
         help="Name for output folder. ", 
         type=str,
@@ -223,6 +236,7 @@ def main():
         t1_path=args.t1_path,
         umap_path=args.umap_path,
         ct_path=args.ct_path,
+        ct_kvp=args.ct_kvp,
         output_folder=args.output_folder,
         version=args.version,
         verbose=args.verbose
