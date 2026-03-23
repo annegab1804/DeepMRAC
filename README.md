@@ -74,7 +74,7 @@ pip install -e .
 
 ## Running the scripts
 
-With the `deepmrac_env` environment activated, you can execute the following CLI commands from any directory. Choose the command corresponding to the model you wish to evaluate. RMI folder must contrain Dicom files. Umap folder must contain Dicom or Interfile files. Another CT can be provided (as a Dicom folder or directly a NIftI image) if you want to compare the synthetic CT results with it. 
+With the `deepmrac_env` environment activated, you can execute the following CLI commands from any directory. Choose the command corresponding to the model you wish to evaluate. RMI folder must contrain Dicom files. Umap folder must contain Dicom or Interfile files. Another CT can be provided (as a Dicom folder or directly a NIftI image) if you want to compare the synthetic CT results with it. You must provide the X-ray tube voltages of this CT scanner (kvp). 
 
 ### T1-weighted (MPRAGE) Model
 
@@ -83,6 +83,7 @@ process-deep-t1 \
     --t1_path your_t1_folder \
     --umap_path your_umap_folder \
     --ct_path your_ct_path \
+    --ct_kvp 120 \
     --output_folder output \
     --verbose True \
     --version VE11P #could be VB20P
@@ -97,6 +98,7 @@ process-deep-ute \
     --ute2_path your_ute2_folder \
     --umap_path your_umap_folder \
     --ct_path your_ct_path \
+    --ct_kvp 120 \
     --output_folder output 
     --verbose True \
     --version VE11P #could be VB20P
@@ -110,6 +112,7 @@ process-deep-dixon \
     --opposedphase_path your_opposedphase_folder\
     --umap_path your_umap_folder \
     --ct_path your_ct_path \
+    --ct_kvp 120 \
     --output_folder output \
     --verbose True \
     --version VE11P #could be VB20P
