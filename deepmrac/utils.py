@@ -225,7 +225,7 @@ def resample_to_output_format(
     voxel resolution.
 
     Args:
-        pred_nii (nib.nifti1.Nifti1Image): The NIfTI predicted image (e.g., sCT).
+        pred_nii (nib.nifti1.Nifti1Image): The NIfTI predicted image.
         umap_native (nib.nifti1.Nifti1Image): The original native NIfTI image 
             defining the target geometry and coordinate system.
         output_file (str, optional): Path where the resampled NIfTI file will be saved.
@@ -323,7 +323,7 @@ def transform_ct_to_mu511(
     mask_low = hu_shifted < bp
     mu_map[mask_low] = 9.6e-5 * hu_shifted[mask_low]
     
-    # 2nd case : Bones
+    # 2nd case : Above the Breakpoint (Bones)
     mask_high = hu_shifted >= bp
     mu_map[mask_high] = a * hu_shifted[mask_high] + b
 

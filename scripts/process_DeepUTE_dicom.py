@@ -29,7 +29,7 @@ def run_pipeline(
     version: str = 'VE11P',
     verbose: bool = True,
 ) -> None:
-    """Executes the DeepUTE pipeline to generate MRAC DICOM files from UTE and Umap data.
+    """Executes the DeepUTE pipeline to generate synthetic Umaps from UTE and Umap data.
 
     This implementation is based on the methodology described in:
     Ladefoged CN, Hansen AE, Henriksen OM, et al. AI-driven attenuation correction for 
@@ -38,7 +38,7 @@ def run_pipeline(
 
     The pipeline sorts DICOM files for both UTE echoes, converts them to NIfTI, 
     performs isotropic resampling, runs the DeepUTE prediction model (dual-channel), 
-    and exports the final result back into DICOM format using the Umap as a template. 
+    and exports the final result back into DICOM or interfile format using the Umap as a template. 
     It concludes by calculating quality metrics (MAE, PSNR, SSIM, Dice).
 
     Args:
@@ -56,7 +56,7 @@ def run_pipeline(
             Defaults to True.
 
     Returns:
-        None. The generated DICOM files are saved directly to `output_folder`.
+        None. The generated files are saved directly to `output_folder`.
 
     Raises:
         FileExistsError: If the `output_folder` already exists and contains files, 

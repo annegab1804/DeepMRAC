@@ -1,6 +1,6 @@
 ﻿# DeepMRAC - Inference and Evaluation Pipeline
 
-DeepMRAC is a deep learning-based framework for generating pseudo-CT (pCT) attenuation correction maps from various MRI sequences (Dixon, T1w MPRAGE, and UTE).
+DeepMRAC is a deep learning-based framework for generating synthetic attenuation correction maps from various MRI sequences (Dixon, T1w MPRAGE, and UTE).
 
 This implementation utilizes the original models and methodology described in:
 Ladefoged CN, Hansen AE, Henriksen OM, et al. AI-driven attenuation correction for brain PET/MRI: Clinical evaluation of a dementia cohort and importance of the training group size. Neuroimage. 2020;222:117221. doi:10.1016/j.neuroimage.2020.117221 .
@@ -11,7 +11,7 @@ All versions are implemented for VB20P and VE11P in seperate models.
 
 ## Overview 
 
-The pipeline provides a fully automated end-to-end workflow, transforming raw anatomical MRI data into clinical-ready PET attenuation maps (sCT):
+The pipeline provides a fully automated end-to-end workflow, transforming raw anatomical MRI data into clinical-ready PET attenuation maps (sUmaps):
 
 DICOM Orchestration: Automatically identifies and organizes raw RMI and Umap (DICOM or Interfile) datasets by Instance Number to ensure spatial continuity.
 
@@ -123,9 +123,9 @@ process-deep-dixon \
 
 Upon completion, the pipeline:
 
-Generates a new DICOM series in the specified output folder.
+Generates a new DICOM series or interfile file in the specified output folder.
 
-Plots axial, coronal and sagittal views of the RMI inputs, the predicted sCT, the Umaps and the reference CT if provided.
+Plots axial, coronal and sagittal views of the RMI inputs, the predicted Umap, the CT-Umap used as a template and the reference CT converted into a Umap if provided.
 
 If a CT is provided, prints quality metrics to the console and appends results to a summary file using Pandas: output/all_metrics.csv.
 

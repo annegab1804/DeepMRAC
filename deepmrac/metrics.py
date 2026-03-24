@@ -1,5 +1,4 @@
 import numpy as np
-import SimpleITK as sitk
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 import os
 import pandas as pd
@@ -32,18 +31,18 @@ def calculate_dice(
 
 
 def calculate_quality_metrics(
-    sct_nii_path: str,
-    ct_nii_path: str,
+    smu_nii_path: str,
+    mu_nii_path: str,
 ) -> dict[str, float]:
-    """Computes metrics between a synthetic CT and the original CT.
+    """Computes metrics between a synthetic umap and the original umap.
 
-    This function loads both DICOM series, ensures they have matching dimensions,
+    This function loads both NIftI files, ensures they have matching dimensions,
     and calculates standard image quality metrics to evaluate model performance.
     Computes bias estimates (RE, ARE, ME, MAE) plus PSNR, SSIM, and Dice.
 
     Args:
-        sct_nii (str): Path to the NIftI image of the synthetic CT.
-        ct_nii (str): Path to the  NIftI image of the original CT.
+        sct_nii (str): Path to the NIftI image of the synthetic umap.
+        ct_nii (str): Path to the  NIftI image of the original umap.
 
     Returns:
         A dictionary containing the calculated metrics:
@@ -56,22 +55,22 @@ def calculate_quality_metrics(
             - "Dice": Dice Similarity Coefficient (closer to 1 is better).
 
     Raises:
-        ValueError: If the shapes of the sCT and CT volumes do not match.
+        ValueError: If the shapes of the synthetic umap and umap volumes do not match.
     """
     # Extract data
-    sct_nii = nib.load(sct_nii_path)
-    ct_nii = nib.load(ct_nii_path)
+    smu_nii = nib.load(smu_nii_path)
+    mu_nii = nib.load(mu_nii_path)
 
-    sct_vol = sct_nii.get_fdata().astype(np.float32)
-    ct_vol = ct_nii.get_fdata().astype(np.float32)
+    smu_vol = smu_nii.get_fdata().astype(np.float32)
+    mu_vol = mu_nii.get_fdata().astype(np.float32)
 
     # Ensure shapes match (Crucial for voxel-wise comparison)
-    if sct_vol.shape != ct_vol.shape:
-        raise ValueError(f"Shape mismatch: sCT {sct_vol.shape} vs CT {ct_vol.shape}")
+    if smu_vol.shape != mu_vol.shape:
+        raise ValueError(f"Shape mismatch: synthetic umap {smu_vol.shape} vs umap {mu_vol.shape}")
     
     
-    print(f"sCT Range: {sct_vol.min():.2f} to {sct_vol.max():.2f}")
-    print(f"CT Range: {ct_vol.min():.2f} to {ct_vol.max():.2f}")
+    print(f"sUmap Range: {smu_vol.min():.2f} to {smu_vol.max():.2f}")
+    print(f"Umap Range: {mu_vol.min():.2f} to {mu_vol.max():.2f}")
     
     metrics_dict = {}
 
@@ -81,29 +80,29 @@ def calculate_quality_metrics(
     }
     
     for prefix, threshold in modes.items():
-        mask = ct_vol > threshold
-        sct_valid = sct_vol[mask]
-        ct_valid = ct_vol[mask]
+        mask = mu_vol > threshold
+        smu_valid = smu_vol[mask]
+        mu_valid = mu_vol[mask]
         
-        if len(ct_valid) > 0:
-            diff = sct_valid - ct_valid
+        if len(mu_valid) > 0:
+            diff = smu_valid - mu_valid
             metrics_dict[f"{prefix}_ME"] = float(np.mean(diff))
             metrics_dict[f"{prefix}_MAE"] = float(np.mean(np.abs(diff)))
 
             eps = 1e-6
-            metrics_dict[f"{prefix}_RE"] = float(np.mean(diff / np.abs(ct_valid) + eps))
-            metrics_dict[f"{prefix}_ARE"] = float(np.mean(np.abs(diff) / np.abs(ct_valid) + eps))
+            metrics_dict[f"{prefix}_RE"] = float(np.mean(diff / np.abs(mu_valid) + eps))
+            metrics_dict[f"{prefix}_ARE"] = float(np.mean(np.abs(diff) / np.abs(mu_valid) + eps))
             
-            metrics_dict[f"{prefix}_Dice"] = float(calculate_dice(sct_vol, ct_vol, threshold))
+            metrics_dict[f"{prefix}_Dice"] = float(calculate_dice(smu_vol, mu_vol, threshold))
         else:
             for m in ["ME", "MAE", "RE", "ARE", "Dice"]:
                 metrics_dict[f"{prefix}_{m}"] = 0.0
 
     # Normalize for PSNR/SSIM (Metrics usually expect a defined range)
-    # We use the max/min of the reference (CT)
-    data_range = ct_vol.max() - ct_vol.min()
-    metrics_dict["PSNR"] = float(peak_signal_noise_ratio(ct_vol, sct_vol, data_range=data_range))
-    metrics_dict["SSIM"] = float(structural_similarity(ct_vol, sct_vol, data_range=data_range))
+    # We use the max/min of the reference (Umap)
+    data_range = mu_vol.max() - mu_vol.min()
+    metrics_dict["PSNR"] = float(peak_signal_noise_ratio(mu_vol, smu_vol, data_range=data_range))
+    metrics_dict["SSIM"] = float(structural_similarity(mu_vol, smu_vol, data_range=data_range))
 
     return metrics_dict
 

@@ -29,7 +29,7 @@ def run_pipeline(
     version: str = 'VE11P',
     verbose: bool = True,
 ) -> None:
-    """Executes the DeepDixon pipeline to generate MRAC DICOM files from Dixon and Umap data.
+    """Executes the DeepDixon pipeline to generate synthetic Umaps from Dixon and Umap data.
 
     This implementation is based on the methodology described in:
     Ladefoged CN, Hansen AE, Henriksen OM, et al. AI-driven attenuation correction for 
@@ -39,14 +39,14 @@ def run_pipeline(
     The pipeline sorts DICOM files for both Dixon phases (In-phase and Opposed-phase), 
     converts them to NIfTI, performs isotropic resampling to 192^3, runs the 
     DeepDixon prediction model (dual-channel), and exports the final result back 
-    into DICOM format using the Umap as a template. It concludes by calculating 
+    into the CT umap's format using the Umap as a template. It concludes by calculating 
     quality metrics (MAE, PSNR, SSIM, Dice).
 
     Args:
         inphase_path (str): Path to the directory containing Dixon In-phase DICOM files.
         opposedphase_path (str): Path to the directory containing Dixon Opposed-phase DICOM files.
         umap_path (str): Path to the directory containing Umap (template) DICOM or interfile files.
-        output_folder (str): Path where the resulting MRAC DICOM or interfile files will be saved.
+        output_folder (str): Path where the resulting DICOM or interfile files will be saved.
         ct_path (str, optional): Path to folder with dicom files or path to the nifti file of original CT.. 
             Defaults to None.
         ct_kvp (int, optional): x-ray tube voltages of the CT scanner (kvp).
@@ -57,7 +57,7 @@ def run_pipeline(
             Defaults to True.
 
     Returns:
-        None. The generated DICOM files are saved directly to `output_folder`.
+        None. The generated files are saved directly to `output_folder`.
 
     Raises:
         FileExistsError: If the `output_folder` already exists and contains files, 

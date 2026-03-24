@@ -113,9 +113,12 @@ def plot_3d_views(
     Args:
         volume (np.ndarray): 3D array of the imaging data (Z, Y, X order preferred).
         aspects (dict, optional): Pixel aspect ratios for each plane. 
-            e.g., {'axial': 1.0, 'coronal': 2.5, 'sagittal': 2.5}. Defaults to None.
+            e.g., {'axial': 1.0, 'coronal': 2.5, 'sagittal': 2.5}.
+            Defaults to None.
         rotation_map (dict, optional): Number of 90-degree CCW rotations per plane.
+            Defaults to None.
         flip_map (dict, optional): Axis to flip per plane (0 for vertical, 1 for horizontal).
+            Default to None.
 
     Returns:
         None: Displays a matplotlib figure.
@@ -297,7 +300,7 @@ def plot_comparison(
     prediction_path: str, 
     umap_path: str,
     model_type: Literal['T1', 'UTE', 'Dixon'] = 'T1',
-    sct_path: str | None  = None,
+    ref_path: str | None  = None,
     output_path: str | None = None
 ) -> None:
     """Generates a comparison plot for DeepT1, DeepUTE, or DeepDixon models.
@@ -308,7 +311,7 @@ def plot_comparison(
         umap_path (str): Path to the Umap template NIfTI file.
         model_type (str, optional): Type of model to adapt labels ('T1', 'UTE', or 'Dixon'). 
             Defaults to 'T1'.
-        sct_path (str, optional): Optional path to a reference sCT.
+        ref_path (str, optional): Optional path to a reference Umap.
             Defaults to None.
         output_path (str, optional): Optional path to save the resulting figure.
             Defaults to None.
@@ -328,12 +331,12 @@ def plot_comparison(
 
     # Build lists dynamically
     paths = [input_path, prediction_path, umap_path]
-    names = [main_input_label, model_name, "Umap"]
+    names = [main_input_label, model_name, "CT Umap"]
     
-    if sct_path:
-        # Insert reference sCT before Umap for direct visual comparison
-        paths.insert(2, sct_path)
-        names.insert(2, "sCT Reference")
+    if ref_path:
+        # Insert reference Umap for direct visual comparison
+        paths.insert(2, ref_path)
+        names.insert(2, "Reference Umap")
         
     planes = ['axial', 'coronal', 'sagittal']
     num_cols = len(paths)

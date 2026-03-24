@@ -99,7 +99,7 @@ def predict(
 ) -> np.ndarray:
     """Runs model inference on patches and reconstructs the full 3D volume.
 
-    The function slides through the patches, predicts the pseudo-CT (pCT) content,
+    The function slides through the patches, predicts the pseudo-Umap (pmu) content,
     and handles overlapping areas by maintaining a counter to calculate a 
     voxel-wise average, reducing edge artifacts.
 
@@ -121,7 +121,7 @@ def predict(
     # Process a patch at a time
     for p in range(patches.shape[0]):
         from_h = p*sh # Start slice of patch
-        predicted = model.predict(np.reshape(patches[p,:,:,:,:],(1,16,192,192,patches.shape[-1]))) # Predict pCT for patch
+        predicted = model.predict(np.reshape(patches[p,:,:,:,:],(1,16,192,192,patches.shape[-1]))) # Predict pmu for patch
         predicted[ predicted == np.nan ] = -1 # Can occur, remove so output does not fail, but set to a value that can be searched for
         predicted_combined[from_h:from_h+h,:,:] += np.reshape(predicted,(16,192,192)) # Insert into container
         predicted_counter[from_h:from_h+h,:,:] += 1 # Update counter in area of patch for later average
@@ -147,7 +147,7 @@ def predict_DeepUTE(
         version (str): Software version ('VE11P' or 'VB20P'). Defaults to 'VE11P'.
 
     Returns:
-        np.ndarray | None: The predicted pCT volume, or None if version is unsupported.
+        np.ndarray | None: The predicted pUmap volume x 10000, or None if version is unsupported.
     """
     # Load model
     if version == 'VE11P':
@@ -181,7 +181,7 @@ def predict_DeepDixon(
         version (str): Software version ('VE11P' or 'VB20P').
 
     Returns:
-        np.ndarray | None: The predicted pCT volume.
+        np.ndarray | None: The predicted pUmap volume x 10000.
     """
     # Load model
     if version == 'VE11P':
@@ -213,7 +213,7 @@ def predict_DeepT1(
         version (str): Software version ('VE11P' or 'VB20P').
 
     Returns:
-        np.ndarray | None: The predicted pCT volume.
+        np.ndarray | None: The predicted pUmap volume x 10000.
     """
     # Load model
     if version == 'VE11P':

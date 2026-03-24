@@ -29,7 +29,7 @@ def run_pipeline(
     version: str | None = 'VE11P',
     verbose: bool | None = True,
 ):
-    """Executes the DeepT1 pipeline to generate MRAC DICOM files from T1 and Umap data.
+    """Executes the DeepT1 pipeline to generate synthetic Umaps from T1 and Umap data.
 
     This implementation is based on the methodology described in:
     Ladefoged CN, Hansen AE, Henriksen OM, et al. AI-driven attenuation correction for 
@@ -38,13 +38,13 @@ def run_pipeline(
 
     This pipeline sorts DICOM inputs, converts them to NIfTI, performs resampling, 
     runs the deep learning prediction model, and exports the final result back 
-    into a DICOM format using the Umap as a header template. It finally calculates
+    into a DICOM or interfile format using the Umap as a header template. It finally calculates
     and prints quality metrics (MAE, PSNR, SSIM, Dice).
 
     Args:
         t1_path (str): Path to the directory containing T1-weighted MPRAGE DICOM files.
         umap_path (str): Path to the directory containing Umap DICOM or interfile files.
-        output_folder (str): Path where the resulting MRAC DICOM files will be saved.
+        output_folder (str): Path where the resulting synthetic umap files will be saved.
         ct_path (str, optional): Path to folder with dicom files or Path to the nifti file of original CT. 
             Defaults to None.
         ct_kvp (int, optional): x-ray tube voltages of the CT scanner (kvp).
@@ -55,8 +55,7 @@ def run_pipeline(
             Defaults to True.
 
     Returns:
-        None. The function saves the generated DICOM files directly to the 
-        `output_folder`.
+        None. The function saves the generated files directly to the `output_folder`.
 
     Raises:
         FileExistsError: If the `output_folder` already exists and contains files, 
