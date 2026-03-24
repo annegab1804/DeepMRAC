@@ -39,7 +39,8 @@ def run_pipeline(
     The pipeline sorts DICOM files for both UTE echoes, converts them to NIfTI, 
     performs isotropic resampling, runs the DeepUTE prediction model (dual-channel), 
     and exports the final result back into DICOM or interfile format using the Umap as a template. 
-    It concludes by calculating quality metrics (MAE, PSNR, SSIM, Dice).
+    It concludes by calculating quality metrics (MAE, PSNR, SSIM, Dice) between synthetic Umap
+    created and the CT-Umap used as a template.
 
     Args:
         ute1_path (str): Path to the directory containing UTE Echo 1 DICOM files.
@@ -127,7 +128,31 @@ def run_pipeline(
                 
         print(f"Success! Result saved in: {output_folder}")
 
-        ct_nii_resampled_path = None
+        # Calculate metrics
+        metrics_dict = calculate_quality_metrics(
+            smu_nii_path=f"{output_folder}/DeepUTE.nii.gz",
+            mu_nii_path=f"{tmpdir}/umap.nii.gz",
+        )
+
+        if verbose:
+            print("\n" + "="*30)
+            print(" GLOBAL QUALITY METRICS ")
+            print("="*30)
+            print(f"PSNR: {metrics_dict['PSNR']:.2f}")
+            print(f"SSIM: {metrics_dict['SSIM']:.4f}")
+                        
+            for mode in ['tissue', 'bone']:
+                print(f"\n--- {mode.upper()} ANALYSIS ---")
+                print(f"MAE:  {metrics_dict[f'{mode}_MAE']:.4f}")
+                print(f"ME:   {metrics_dict[f'{mode}_ME']:.4f}")
+                print(f"RE:   {metrics_dict[f'{mode}_RE']:.4f}")
+                print(f"ARE:  {metrics_dict[f'{mode}_ARE']:.4f}")
+                print(f"Dice: {metrics_dict[f'{mode}_Dice']:.4f}")
+            print("="*30)
+
+        save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='DeepUTE', output_folder=f"{output_folder}/metrics")
+        
+        mu_nii_resampled_path = None
 
         if ct_path and os.path.exists(ct_path):
             is_nifti = ct_path.lower().endswith(('.nii', '.nii.gz'))
@@ -140,38 +165,22 @@ def run_pipeline(
                 sort_dicomfiles(source_folder=ct_path, temp_subfolder=f"{tmpdir}/ct_dcm", verbose=verbose)
                 convert_dicom_to_nifti(dicom_dir=f"{tmpdir}/ct_dcm", output_nii=f"{tmpdir}/ct.nii.gz", verbose=verbose)
                 ct_nat = nib.load(f'{tmpdir}/ct.nii.gz')
-
+            
             # Resample using Umap's grid size
-            ct_nat = transform_ct_to_mu511(ct_nat, kvp=ct_kvp)
-            ct_nii_resampled_path = f"{output_folder}/CT_resampled.nii.gz"
-            ct_rsl = resample_to_output_format(pred_nii=ct_nat, umap_native=umap_nat, verbose=verbose, output_file=ct_nii_resampled_path)
+            mu_nat = transform_ct_to_mu511(ct_nat, kvp=ct_kvp)
+            mu_nii_resampled_path = f"{output_folder}/UMAP_resampled.nii.gz"
+            mu_rsl = resample_to_output_format(pred_nii=mu_nat, umap_native=umap_nat, verbose=verbose, output_file=mu_nii_resampled_path)
 
             # Calculate metrics
             metrics_dict = calculate_quality_metrics(
-                sct_nii_path=f"{output_folder}/DeepUTE.nii.gz",
-                ct_nii_path=f"{output_folder}/CT_resampled.nii.gz",
+                    smu_nii_path=mu_nii_resampled_path,
+                    mu_nii_path=f'{tmpdir}/umap.nii.gz',
             )
 
-            if verbose:
-                print("\n" + "="*30)
-                print(" GLOBAL QUALITY METRICS ")
-                print("="*30)
-                print(f"PSNR: {metrics_dict['PSNR']:.2f}")
-                print(f"SSIM: {metrics_dict['SSIM']:.4f}")
-                        
-                for mode in ['tissue', 'bone']:
-                    print(f"\n--- {mode.upper()} ANALYSIS ---")
-                    print(f"MAE:  {metrics_dict[f'{mode}_MAE']:.4f}")
-                    print(f"ME:   {metrics_dict[f'{mode}_ME']:.4f}")
-                    print(f"RE:   {metrics_dict[f'{mode}_RE']:.4f}")
-                    print(f"ARE:  {metrics_dict[f'{mode}_ARE']:.4f}")
-                    print(f"Dice: {metrics_dict[f'{mode}_Dice']:.4f}")
-                print("="*30)
+            save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='Reference CT', output_folder=f"{output_folder}/metrics")
 
-            save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='UTE', output_folder=f"{output_folder}/metrics")
-        
         # Plot
-        plot_comparison(input_path=f"{tmpdir}/ute1.nii.gz", prediction_path=f"{output_folder}/DeepUTE.nii.gz", umap_path=f'{tmpdir}/umap.nii.gz', sct_path=ct_nii_resampled_path,  model_type="UTE", output_path=f"{output_folder}/comparison_plot.png")
+        plot_comparison(input_path=f"{tmpdir}/ute1.nii.gz", prediction_path=f"{output_folder}/DeepUTE.nii.gz", umap_path=f'{tmpdir}/umap.nii.gz', ref_path=mu_nii_resampled_path,  model_type="UTE", output_path=f"{output_folder}/comparison_plot.png")
 
     finally: 
         # Cleanup
