@@ -25,7 +25,7 @@ Clinical Integration: * Inverse Transformation: Reverts the orientation and resa
 
 Header Re-projection: Wraps the predicted volume into the original DICOM/Interfile metadata (template) for seamless PACS or workstation integration.
 
-Quality Assurance: Automatically computes and saves global and tissue-specific metrics (MAE, PSNR, SSIM, and Dice) between the synthetic Umap and the one used as a template.
+Quality Assurance: If a CT or CTAC is provided, automatically computes and saves global and tissue-specific metrics (MAE, PSNR, SSIM, and Dice) between the synthetic Umap and the CT one.
 
 ## Installation
 
@@ -127,5 +127,5 @@ Generates a new DICOM series or interfile file in the specified output folder.
 
 Plots axial, coronal and sagittal views of the RMI inputs, the predicted Umap, the CT-Umap used as a template and the reference CT converted into a Umap if provided.
 
-Prints quality metrics to the console and appends results to a summary file using Pandas: output/all_metrics.csv.
+If another CT is provided, prints quality metrics to the console and appends results to a summary file using Pandas: output/all_metrics.csv.
 

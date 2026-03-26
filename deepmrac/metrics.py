@@ -143,3 +143,34 @@ def save_metrics_to_csv(
         df_new.to_csv(csv_path, mode='w', index=False, header=True)
         
     print(f"Metrics saved at : {csv_path}")
+
+
+def calculate_synthesis_metrics(
+    tabs_list: list[pd.DataFrame]
+) -> list:
+    """Calculate Mean and std for different metric by methods.
+
+    Agrs: 
+        tabs_list (list[pd.DataFrame]): List of pandas dataframe with a column Method.
+
+    Returns:
+        A dataframe with the number of patients and the mean +- std of each metric
+            grouped by the Method column.
+    """
+    if not tabs_list:
+        return None
+    
+    whole_df = pd.concat(tabs_list, ignore_index=True)
+    metrics = whole_df.select_dtypes(include=['number']).columns.tolist()
+    
+    stats = whole_df.groupby('Method')[metrics].agg(['mean', 'std', 'count'])
+
+    df_final = pd.DataFrame(index=stats.index)
+    df_final['N'] = stats[metrics[0]]['count'].astype(int)
+
+    for m in metrics:
+        mean_vals = stats[m]['mean']
+        std_vals = stats[m]['std']
+        df_final[m] = mean_vals.map('{:.3f}'.format) + " ± " + std_vals.map('{:.3f}'.format)
+
+    return df_final

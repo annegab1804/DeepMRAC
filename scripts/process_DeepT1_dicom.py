@@ -46,7 +46,8 @@ def run_pipeline(
         t1_path (str): Path to the directory containing T1-weighted MPRAGE DICOM files.
         umap_path (str): Path to the directory containing Umap DICOM or interfile files.
         output_folder (str): Path where the resulting synthetic umap files will be saved.
-        ct_path (str, optional): Path to folder with dicom files or Path to the nifti file of original CT. 
+        ct_path (str, optional): Path to folder with dicom files or Path to the nifti file
+            of CT or CTAC. 
             Defaults to None.
         ct_kvp (int, optional): x-ray tube voltages of the CT scanner (kvp).
             Defaults to 120.
@@ -101,10 +102,23 @@ def run_pipeline(
             # Standard sorting for DICOM files
             sort_dicomfiles(source_folder=umap_path, temp_subfolder=f"{tmpdir}/umap_dcm", verbose=verbose)
             convert_dicom_to_nifti(dicom_dir=f"{tmpdir}/umap_dcm", output_nii=f"{tmpdir}/umap.nii.gz", verbose=verbose)
+
+        if verbose:
+            print("Checking umap scaling...")
+
+        umap_nat = nib.load(f'{tmpdir}/umap.nii.gz')     
+        if np.max(umap_nat.get_fdata()) > 10:
+            if verbose:
+                print(f"Scaling detected (Max: {np.max(umap_nat.get_fdata()):.2f}). Dividing by 10000.")
+            new_data = umap_nat.get_fdata() / 10000.0
+            umap_nat = nib.Nifti1Image(new_data, umap_nat.affine, umap_nat.header)
+            nib.save(umap_nat, f'{tmpdir}/umap.nii.gz')
+        else:
+            if verbose:
+                print(f"No scaling needed (Max: {np.max(umap_nat.get_fdata()):.4f}).")
         
         # Load and ressample data
         t1_rsl, t1_ref = load_and_resample_images(nii_image=f"{tmpdir}/t1.nii.gz", verbose=verbose)
-        umap_nat = nib.load(f'{tmpdir}/umap.nii.gz')
 
         # Flip to match orientation on what was trained on
         t1_rsl = np.flipud(np.swapaxes(t1_rsl, 0, 2)) 
@@ -129,37 +143,13 @@ def run_pipeline(
                 
         print(f"Success! Result saved in: {output_folder}")
 
-        # Calculate metrics
-        metrics_dict = calculate_quality_metrics(
-                smu_nii_path=f"{output_folder}/DeepT1.nii.gz",
-                mu_nii_path=f'{tmpdir}/umap.nii.gz',
-        )
-
-        if verbose:
-            print("\n" + "="*30)
-            print(" GLOBAL QUALITY METRICS ")
-            print("="*30)
-            print(f"PSNR: {metrics_dict['PSNR']:.2f}")
-            print(f"SSIM: {metrics_dict['SSIM']:.4f}")
-                        
-            for mode in ['tissue', 'bone']:
-                print(f"\n--- {mode.upper()} ANALYSIS ---")
-                print(f"MAE:  {metrics_dict[f'{mode}_MAE']:.4f}")
-                print(f"ME:   {metrics_dict[f'{mode}_ME']:.4f}")
-                print(f"RE:   {metrics_dict[f'{mode}_RE']:.4f}")
-                print(f"ARE:  {metrics_dict[f'{mode}_ARE']:.4f}")
-                print(f"Dice: {metrics_dict[f'{mode}_Dice']:.4f}")
-            print("="*30)
-
-        save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='DeepT1', output_folder=f"{output_folder}/metrics")
-
-        mu_nii_resampled_path = None
+        ctac_nii_resampled_path = None
 
         if ct_path and os.path.exists(ct_path):
             is_nifti = ct_path.lower().endswith(('.nii', '.nii.gz'))
 
             if is_nifti:
-                if verbose: print(f"Input is already NIfTI: {ct_path}")
+                if verbose: print(f"CT is already NIfTI: {ct_path}")
                 ct_nat = nib.load(ct_path)
             else:
                 # DICOM files
@@ -167,21 +157,63 @@ def run_pipeline(
                 convert_dicom_to_nifti(dicom_dir=f"{tmpdir}/ct_dcm", output_nii=f"{tmpdir}/ct.nii.gz", verbose=verbose)
                 ct_nat = nib.load(f'{tmpdir}/ct.nii.gz')
 
-            # Resample using Umap's grid size
-            mu_nat = transform_ct_to_mu511(ct_nat, kvp=ct_kvp)
-            mu_nii_resampled_path = f"{output_folder}/UMAP_resampled.nii.gz"
-            mu_rsl = resample_to_output_format(pred_nii=mu_nat, umap_native=umap_nat, verbose=verbose, output_file=mu_nii_resampled_path)
+            data_sample = ct_nat.get_fdata()
+            min_val = np.min(data_sample)
+            max_val = np.max(data_sample)
 
-            # Calculate metrics
+            # Check if the values correspond to CT or CTAC
+            if min_val < -50:
+                if verbose: 
+                    print(f"Detected CT data (HU range: {min_val:.1f} to {max_val:.1f}). Transforming to Mu511...")
+                ctac_nat = transform_ct_to_mu511(ct_nat, kvp=ct_kvp)
+            else:
+                if max_val > 10:
+                    if verbose:
+                        print(f"Detected AC/U-map data (Range: {min_val:.4f} to {max_val:.4f}). Skipping CT transform and dividing by 10000.")
+                    new_data = data_sample / 10000.0
+                    ctac_nat = nib.Nifti1Image(new_data, ct_nat.affine, ct_nat.header)
+                else:
+                    if verbose:
+                        print(f"Detected AC/U-map data (Range: {min_val:.4f} to {max_val:.4f}). Skipping CT transform.")
+                    ctac_nat = ct_nat
+            
+            ctac_nii_resampled_path = f"{output_folder}/CTAC_resampled.nii.gz"
+            ctac_rsl = resample_to_output_format(pred_nii=ctac_nat, umap_native=umap_nat, verbose=verbose, output_file=ctac_nii_resampled_path)
+
+            # Calculate metrics DeepT1 - CTAC
             metrics_dict = calculate_quality_metrics(
-                    smu_nii_path=mu_nii_resampled_path,
-                    mu_nii_path=f'{tmpdir}/umap.nii.gz',
+                smu_nii_path=f"{output_folder}/DeepT1.nii.gz",
+                mu_nii_path=ctac_nii_resampled_path,
             )
 
-            save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='Reference CT', output_folder=f"{output_folder}/metrics")
+            if verbose:
+                print("\n" + "="*30)
+                print(" GLOBAL QUALITY METRICS ")
+                print("="*30)
+                print(f"PSNR: {metrics_dict['PSNR']:.2f}")
+                print(f"SSIM: {metrics_dict['SSIM']:.4f}")
+                        
+                for mode in ['tissue', 'bone']:
+                    print(f"\n--- {mode.upper()} ANALYSIS ---")
+                    print(f"MAE:  {metrics_dict[f'{mode}_MAE']:.4f}")
+                    print(f"ME:   {metrics_dict[f'{mode}_ME']:.4f}")
+                    print(f"RE:   {metrics_dict[f'{mode}_RE']:.4f}")
+                    print(f"ARE:  {metrics_dict[f'{mode}_ARE']:.4f}")
+                    print(f"Dice: {metrics_dict[f'{mode}_Dice']:.4f}")
+                print("="*30)
+
+            save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='DeepT1', output_folder=f"{output_folder}/metrics")
+
+            # Calculate metrics UTE Umap - CTAC
+            metrics_dict = calculate_quality_metrics(
+                    smu_nii_path=f'{tmpdir}/umap.nii.gz',
+                    mu_nii_path=ctac_nii_resampled_path,
+            )
+
+            save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='Template Umap', output_folder=f"{output_folder}/metrics")
         
         # Plot
-        plot_comparison(input_path=f"{tmpdir}/t1.nii.gz", prediction_path=f"{output_folder}/DeepT1.nii.gz", umap_path=f'{tmpdir}/umap.nii.gz', ref_path=mu_nii_resampled_path, model_type="T1", output_path=f"{output_folder}/comparison_plot.png")
+        plot_comparison(input_path=f"{tmpdir}/t1.nii.gz", prediction_path=f"{output_folder}/DeepT1.nii.gz", template_umap_path=f'{tmpdir}/umap.nii.gz', ctac_path=ctac_nii_resampled_path, model_type="T1", output_path=f"{output_folder}/comparison_plot.png")
 
     finally:
         shutil.rmtree(tmpdir)
@@ -201,13 +233,13 @@ def main():
     )
     parser.add_argument(
         "--umap_path", 
-        help="Path to folder with dicom or interfile files of Umap.", 
+        help="Path to folder with dicom or interfile files of UTE Umap.", 
         type=str,
         required=True
     )
     parser.add_argument(
         "--ct_path", 
-        help="Path to folder with dicom files or Path to the nifti file of original CT.", 
+        help="Path to folder with dicom files or Path to the nifti file of CT or CTAC.", 
         type=str,
         default=None,
         required=False,

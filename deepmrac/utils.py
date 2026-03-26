@@ -49,34 +49,49 @@ def sort_dicomfiles(
         raise FileExistsError(f"Folder {temp_subfolder} is not empty !")
     
     os.makedirs(temp_subfolder, exist_ok=True)
-        
-    for root,subdirs,files in os.walk(source_folder):
-        if len(subdirs) > 0 or not files:
-            continue
-        
-        if verbose:
-            print("Found files in %s. Making copy" % root)
-        
+
+    series_counts = {}
+    file_metadata = []
+
+    for root, _, files in os.walk(source_folder):
         for f in files:
-            if f.startswith('.'): 
-                continue
-            
+            if f.startswith('.'): continue
             file_path = os.path.join(root, f)
             try:
-                dcm = dicom.dcmread(file_path)
-            except dicom.errors.InvalidDicomError:
+                ds = dicom.dcmread(file_path, stop_before_pixels=True)
+                # We ignore localizer
+                if "localizer" in getattr(ds, "SeriesDescription", "").lower():
+                    continue
+                
+                uid = ds.SeriesInstanceUID
+                instance_num = int(ds.InstanceNumber)
+                
+                series_counts[uid] = series_counts.get(uid, 0) + 1
+                file_metadata.append((file_path, uid, instance_num))
+            except (dicom.errors.InvalidDicomError, AttributeError):
                 continue
 
-            if "localizer" in getattr(dcm, "SeriesDescription", "").lower():
-                continue
+    if not series_counts:
+        print("No valid DICOM file found.")
+        return
+    
+    main_series_uid = max(series_counts, key=series_counts.get)
+    
+    if verbose:
+        print(f"Principal Serie identified : {main_series_uid} ({series_counts[main_series_uid]} images)")
 
-            if not hasattr(dcm, 'InstanceNumber'):
-                raise AttributeError(f"File {f} lacks an 'InstanceNumber' DICOM tag.")
+    if verbose and len(series_counts) > 1:
+        print(f"Note: {len(series_counts) - 1} other serie(s) detected and ignored.")
 
-            dest_path = os.path.join(temp_subfolder, f"dicom{int(dcm.InstanceNumber)}.ima")
+    # Copy only the files from this Serie
+    for file_path, uid, instance_num in file_metadata:
+        if uid == main_series_uid:
+            dest_path = os.path.join(temp_subfolder, f"dicom{instance_num:03d}.ima")
+            
             if os.path.exists(dest_path):
-                raise RuntimeError(f"InstanceNumber {dcm.InstanceNumber} already exists in {temp_subfolder}!")
-
+                print(f"Warning : InstanceNumber {instance_num} already exists in {temp_subfolder}, this file is ignored.")
+                continue
+                
             shutil.copyfile(file_path, dest_path)
 
 def convert_interfile_to_nifti(hdr_path: str, output_nii_path: str) -> None:
@@ -121,7 +136,16 @@ def convert_interfile_to_nifti(hdr_path: str, output_nii_path: str) -> None:
 
     # Create a standard affine (X, Y, Z)
     # We assume RAS orientation for HRRT by default
-    affine = np.diag([vox_size[0], vox_size[1], vox_size[2], 1.0])
+    off_x = - (dim[0] - 1) * vox_size[0] / 2.0
+    off_y = - (dim[1] - 1) * vox_size[1] / 2.0
+    off_z = - (dim[2] - 1) * vox_size[2] / 2.0
+
+    affine = np.array([
+        [vox_size[0], 0,           0,           off_x],
+        [0,           vox_size[1], 0,           off_y],
+        [0,           0,           vox_size[2], off_z],
+        [0,           0,           0,           1.0]
+    ])
     
     # Save
     nii_img = nib.Nifti1Image(volume_xyz, affine)
@@ -144,7 +168,7 @@ def convert_dicom_to_nifti(
             (e.g., the 'dicom' subfolder with sorted .ima or .dcm files).
         output_nii (str): Full path (including filename) where the converted 
             .nii.gz file will be saved.
-        verbose (bool): If True, prints status updates to the console during 
+        verbose (bool, optional): If True, prints status updates to the console during 
             the conversion process.
             Defaults to False.
 
@@ -242,26 +266,13 @@ def resample_to_output_format(
     pred_nii = nib.as_closest_canonical(pred_nii)
     umap_native = nib.as_closest_canonical(umap_native)
 
-    # Calculate world coordinates of the center of both volumes
-    # Formula: Affine @ [center_voxel_coords, 1]
-    target_center = umap_native.affine @ np.append(np.array(umap_native.shape[:3]) / 2.0, 1)
-    pred_center = pred_nii.affine @ np.append(np.array(pred_nii.shape[:3]) / 2.0, 1)
-    
-    # Adjust the translation (4th column) of the prediction affine to match target center
-    # This prevents "black images" caused by coordinate misalignment
-    new_pred_affine = pred_nii.affine.copy()
-    new_pred_affine[:3, 3] += (target_center[:3] - pred_center[:3])
-    
-    # Create a temporary NIfTI object with the corrected spatial position
-    pred_nii_aligned = nib.Nifti1Image(pred_nii.get_fdata(), new_pred_affine)
-
     # Get background value for padding (usually the minimum intensity)
     data_src = pred_nii.get_fdata()
     fill_val = float(np.min(data_src))
 
     # Resampling
     pred_rsl = resample_img(
-        pred_nii_aligned,
+        pred_nii,
         target_affine=umap_native.affine, 
         target_shape=umap_native.shape,
         interpolation='linear',
