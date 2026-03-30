@@ -282,18 +282,30 @@ def load_interfile_volume_and_aspects(hdr_path: str) -> tuple[np.ndarray, dict[s
     data = np.fromfile(img_path, dtype=np.float32)
     
     # IMPORTANT: Reshape to (Z, Y, X) first because that's how Interfile stores it
-    volume_zyx = data.reshape((dim[2], dim[1], dim[0]))
-    volume_zyx = volume_zyx[::-1, ::-1, :]
+    # We assume LPI orientation for HRRT by default
+    volume_zyx_lpi = data.reshape((dim[2], dim[1], dim[0]))
+    volume_zyx_ras = volume_zyx_lpi[::-1, ::-1, ::-1]
 
     # Reorder to (X, Y, Z) for NIfTI standard
     # This is what allows 'as_closest_canonical' to work later
-    volume_xyz = volume_zyx.transpose(2, 1, 0)
+    volume_xyz_ras = volume_zyx_ras.transpose(2, 1, 0)
 
     # Create a standard affine (X, Y, Z)
-    # We assume RAS orientation for HRRT by default
-    affine = np.diag([vox_size[0], vox_size[1], vox_size[2], 1.0])
-    nii_img = nib.Nifti1Image(volume_xyz, affine)
+    # We assume LPI orientation for HRRT by default
+    off_x = - (dim[0] - 1) * vox_size[0] / 2.0
+    off_y = - (dim[1] - 1) * vox_size[1] / 2.0
+    off_z = - (dim[2] - 1) * vox_size[2] / 2.0
+
+    affine = np.array([
+        [vox_size[0], 0,           0,           off_x],
+        [0,           vox_size[1], 0,           off_y],
+        [0,           0,           vox_size[2], off_z],
+        [0,           0,           0,           1.0]
+    ])
+
+    nii_img = nib.Nifti1Image(volume_xyz_ras, affine)
     return extracts_nifti_volume_and_aspects(nii_img)
+
 
 def plot_comparison(
     input_path: str, 

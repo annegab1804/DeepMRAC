@@ -99,8 +99,7 @@ def convert_interfile_to_nifti(hdr_path: str, output_nii_path: str) -> None:
 
     This function parses the .i.hdr text file for dimensions and voxel sizes,
     reads the corresponding .i binary file, and reorders the data from the 
-    Interfile (Z, Y, X) storage format to a standard NIfTI (X, Y, Z) structure.
-    Finally, it ensures the output is saved in the canonical RAS orientation.
+    Interfile (Z, Y, X) LPI storage format to a standard NIfTI (X, Y, Z) RSA structure.
 
     Args:
         hdr_path (str): Path to the Interfile header (.i.hdr) file.
@@ -127,15 +126,15 @@ def convert_interfile_to_nifti(hdr_path: str, output_nii_path: str) -> None:
     data = np.fromfile(img_path, dtype=np.float32)
     
     # IMPORTANT: Reshape to (Z, Y, X) first because that's how Interfile stores it
-    volume_zyx = data.reshape((dim[2], dim[1], dim[0]))
-    volume_zyx = volume_zyx[::-1, ::-1, :]
+    # We assume LPI orientation for HRRT by default
+    volume_zyx_lpi = data.reshape((dim[2], dim[1], dim[0]))
+    volume_zyx_ras = volume_zyx_lpi[::-1, ::-1, ::-1]
 
     # Reorder to (X, Y, Z) for NIfTI standard
     # This is what allows 'as_closest_canonical' to work later
-    volume_xyz = volume_zyx.transpose(2, 1, 0)
+    volume_xyz_ras = volume_zyx_ras.transpose(2, 1, 0)
 
     # Create a standard affine (X, Y, Z)
-    # We assume RAS orientation for HRRT by default
     off_x = - (dim[0] - 1) * vox_size[0] / 2.0
     off_y = - (dim[1] - 1) * vox_size[1] / 2.0
     off_z = - (dim[2] - 1) * vox_size[2] / 2.0
@@ -148,9 +147,8 @@ def convert_interfile_to_nifti(hdr_path: str, output_nii_path: str) -> None:
     ])
     
     # Save
-    nii_img = nib.Nifti1Image(volume_xyz, affine)
+    nii_img = nib.Nifti1Image(volume_xyz_ras, affine)
     nib.save(nii_img, output_nii_path)
-
 
 def convert_dicom_to_nifti(
     dicom_dir: str,
@@ -508,12 +506,12 @@ def to_interfile(
     # IMPORTANT: Ensure DeepX is back in the Interfile storage order (Z, Y, X)
     # and use the correct float32 type for HRRT.
     DeepX = DeepX_nii.get_fdata()
-    bin_data = DeepX.astype(np.float32)
-    bin_data = np.transpose(bin_data, (2, 1, 0))
-    bin_data = bin_data[::-1, ::-1, :]
+    bin_data_xyz_ras = DeepX.astype(np.float32)
+    bin_data_zyx_ras = np.transpose(bin_data_xyz_ras, (2, 1, 0))
+    bin_data_zyx_lpi = bin_data_zyx_ras[::-1, ::-1, ::-1]
     
     # Flatten the array to write it as a continuous binary stream
-    bin_data.tofile(new_bin_path)
+    bin_data_zyx_lpi.tofile(new_bin_path)
 
     if verbose:
         print(f" Interfile volume created:")
