@@ -4,7 +4,7 @@ import shutil
 import os
 import nibabel as nib
 import numpy as np
-from deepmrac.utils import (
+from deepmrac.image_processing import (
     str2bool,
     sort_dicomfiles,
     convert_dicom_to_nifti,

@@ -306,6 +306,35 @@ def load_interfile_volume_and_aspects(hdr_path: str) -> tuple[np.ndarray, dict[s
     nii_img = nib.Nifti1Image(volume_xyz_ras, affine)
     return extracts_nifti_volume_and_aspects(nii_img)
 
+def load_ecat_volume_and_aspects(path_v: str) -> tuple[np.ndarray, dict[str, float]]:
+    """Parses ECAT7 file to extract volume and pixel aspect ratios.
+
+    Loads an ECAT7 (.v) file, collapses temporal frames to 3D, and converts 
+    it to a NIfTI coordinate space before extracting visualization aspects.
+
+    Args:
+        path_v (str): Path to the .v file.
+
+    Returns:
+        A tuple containing:
+            - volume: The 3D numpy array reshaped to (Z, Y, X).
+            - aspects: A dictionary with 'axial', 'coronal', and 'sagittal' ratios.
+    """
+    ecat_img = nib.ecat.load(path_v)
+    data = ecat_img.get_fdata()
+    print(data.shape)
+    affine = ecat_img.affine
+
+    # Handle 4D -> 3D
+    if data.ndim == 4:
+        # Extract first frame
+        data_lpi = data[:, :, :, 0]
+        # We assume LPI orientation for HRRT by default
+        data_ras = data_lpi[::-1, ::-1, ::-1]
+
+    nifti_img = nib.Nifti1Image(data_ras, affine)
+    return extracts_nifti_volume_and_aspects(img_nii=nifti_img, verbose=True)
+
 
 def plot_comparison(
     input_path: str, 

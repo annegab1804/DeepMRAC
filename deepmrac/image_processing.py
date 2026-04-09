@@ -94,6 +94,30 @@ def sort_dicomfiles(
                 
             shutil.copyfile(file_path, dest_path)
 
+def convert_ecat_to_nifti(path_v: str, output_nii_path: str) -> None:
+    """Converts an ECAT7 file to a standardized NIfTI image.
+
+    Loads an ECAT7 (.v) file, collapses temporal frames to 3D, and converts 
+    it to a NIfTI coordinate space.
+
+    Args:
+        path_v (str): Path to the .v file.
+        output_nii_path (str): Full path where the .nii.gz file will be saved.
+    """
+    ecat_img = nib.ecat.load(path_v)
+    data = ecat_img.get_fdata()
+    affine = ecat_img.affine
+
+    # Handle 4D -> 3D
+    if data.ndim == 4:
+        # Extract first frame
+        data_lpi = data[:, :, :, 0]
+        # We assume LPI orientation for HRRT by default
+        data_ras = data_lpi[::-1, ::-1, ::-1]
+
+    nifti_img = nib.Nifti1Image(data_ras, affine)
+    nib.save(nifti_img, output_nii_path)
+
 def convert_interfile_to_nifti(hdr_path: str, output_nii_path: str) -> None:
     """Converts an HRRT Interfile volume to a standardized NIfTI image.
 

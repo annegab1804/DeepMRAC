@@ -17,6 +17,8 @@ setup(
         "scikit-image>=0.22.0",
         "SimpleITK>=2.3.0",
         "scipy>=1.11.0",
+        "matplotlib>=3.8.0",
+        "seaborn>=0.13.0",
         "wget"
     ],
     python_requires=">=3.12",
@@ -25,6 +27,7 @@ setup(
             'process-deep-t1=scripts.process_DeepT1_dicom:main',
             'process-deep-ute=scripts.process_DeepUTE_dicom:main',
             'process-deep-dixon=scripts.process_DeepDixon_dicom:main',
+            'create-suv-plots=scripts.create_suv_plots:main',
         ],
     },
 )
