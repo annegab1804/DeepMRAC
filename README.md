@@ -160,6 +160,7 @@ flirt -in hrrt_suv.nii.gz -ref T1_weighted.nii.gz -out hrrt_suv_in_MRI.nii.gz -a
 
 Ensure your data is organized as follows to allow the script to iterate through all subjects:
 
+```
 patient_folder/
     ├── patient_01/
     │   ├── uhr_suv_in_MRI.nii.gz   <-- uhr_name
@@ -173,6 +174,7 @@ patient_folder/
         ├── uhr_suv_in_MRI.nii.gz
         ├── hrrt_suv_in_MRI.nii.gz
         └── output_all_fast_firstseg.nii.gz
+```
 
 ### Generate Evaluation Plots
 
