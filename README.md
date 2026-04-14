@@ -160,9 +160,9 @@ patient_folder/
     │   ├── hrrt_suv.nii.gz
     │   └── t1.nii.gz
     └── patient_03/
-    │   ├── uhr_suv.nii.gz
-    │   ├── hrrt_suv.nii.gz
-    │   └── t1.nii.gz
+        ├── uhr_suv.nii.gz
+        ├── hrrt_suv.nii.gz
+        └── t1.nii.gz
 ```
 
 ### Generate Evaluation Plots
