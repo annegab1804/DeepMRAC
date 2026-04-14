@@ -134,26 +134,15 @@ If another CT is provided, prints quality metrics to the console and appends res
 
 To evaluate the PET images reconstructed with synthetic Umaps (uhr) against a reference method (hrrt), we provide a dedicated evaluation workflow.
 
-### Prerequisites: FSL Installation
-The following steps require FSL (FMRIB Software Library). It must be installed on your system (Linux or macOS) and available in your $PATH. Note: FSL cannot be installed via pip. Please refer to the official FSL installation guide.
+### Prerequisites: AAL atlas Download
 
-### Spatial Pre-processing
-
-Before running the evaluation script, you must align the PET images to the MRI space and generate anatomical masks. Run these commands for each patient:
-
+You first need to download the Atlas manually by clicking this link in your browser: https://www.gin.cnrs.fr/AAL_files/aal_for_SPM12.tar.gz
+Then, oppen your terminal and run:
 ```
-# 1. Brain Extraction (Skull-stripping)
-bet T1_weighted.nii.gz brain.nii.gz -f 0.5 -g 0
-
-# 2. Subcortical Segmentation (to create the ROI masks)
-run_first_all -i brain.nii.gz -o output_segmentation
-
-# 3. Coregister PET images to MRI space using FLIRT (6 DOF)
-# Align synthetic Umap PET (uhr)
-flirt -in uhr_suv.nii.gz -ref T1_weighted.nii.gz -out uhr_suv_in_MRI.nii.gz -omat pet2mri.mat -dof 6
-
-# Align reference PET (hrrt)
-flirt -in hrrt_suv.nii.gz -ref T1_weighted.nii.gz -out hrrt_suv_in_MRI.nii.gz -applyxfm -init pet2mri.mat -dof 6
+mkdir -p ~/nilearn_data/aal_SPM12
+mv ~/Downloads/aal_for_SPM12.tar*  ~/nilearn_data/aal_SPM12/
+cd ~/nilearn_data/aal_SPM12/
+tar -xzvf aal_for_SPM12.tar*
 ```
 
 ### Organizing for Batch Analysis
@@ -163,28 +152,33 @@ Ensure your data is organized as follows to allow the script to iterate through 
 ```
 patient_folder/
     ├── patient_01/
-    │   ├── uhr_suv_in_MRI.nii.gz   <-- uhr_name
-    │   ├── hrrt_suv_in_MRI.nii.gz  <-- hrrt_name
-    │   └── output_all_fast_firstseg.nii.gz  <-- seg_name
+    │   ├── uhr_suv.nii.gz   <-- uhr_name
+    │   ├── hrrt_suv.nii.gz  <-- hrrt_name
+    │   └── t1.nii.gz  <-- t1_name
     ├── patient_02/
-    │   ├── uhr_suv_in_MRI.nii.gz
-    │   ├── hrrt_suv_in_MRI.nii.gz
-    │   └── output_all_fast_firstseg.nii.gz
+    │   ├── uhr_suv.nii.gz
+    │   ├── hrrt_suv.nii.gz
+    │   └── t1.nii.gz
     └── patient_03/
-        ├── uhr_suv_in_MRI.nii.gz
-        ├── hrrt_suv_in_MRI.nii.gz
-        └── output_all_fast_firstseg.nii.gz
+    │   ├── uhr_suv.nii.gz
+    │   ├── hrrt_suv.nii.gz
+    │   └── t1.nii.gz
 ```
 
 ### Generate Evaluation Plots
 
-Once the files are aligned, run the following command to generate the statistical analysis (Bland-Altman, Percentage Difference, and Violin plots) for the different Regions of Interest (ROIs).
+Once the files are organized, run the following command to generate the statistical analysis (Bland-Altman, Percentage Difference, and Violin plots) for the different Regions of Interest (ROIs).
 
 ```
 create-suv-plots \
-    --input_folder patient_folder \
-    --output_folder suv_plots \
-    --uhr_name  uhr_suv_in_MRI.nii.gz \
-    --hrrt_name hrrt_suv_in_MRI.nii.gz \
-    --seg_name output_all_fast_firstseg.nii.gz \
+    --patient_dir patient_folder \
+    --output_dir suv_plots \
+    --uhr_name  uhr_suv.nii.gz \
+    --hrrt_name hrrt_suv.nii.gz \
+    --t1_name t1.nii.gz \
 ```
+
+The script will create the `suv_plots` directory containing: 
+- `Violin_SUVR.png`: Distribution of SUVR across ROIs.
+- `BlandAltman_SUVR.png`: Agreement between UHR and HRRT.
+- `Diff_SUVR.png`: Percentage difference analysis.

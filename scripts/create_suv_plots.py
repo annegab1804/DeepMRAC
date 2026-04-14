@@ -1,128 +1,174 @@
 import os
 import argparse
 import numpy as np
+import ants
+import nibabel as nib
+from nilearn.maskers import NiftiLabelsMasker
+import xml.etree.ElementTree as ET
 
-from deepmrac.suv_utils import get_mean_from_mask, generate_summary_bland_altman, generate_summary_percentage_difference, generate_summary_violin
+from deepmrac.suv_utils import generate_summary_bland_altman, generate_summary_percentage_difference, generate_summary_violin
 
 def create_suv_plots(
-    input_folder: str,
-    output_folder: str,
+    patient_dir: str,
+    output_dir: str,
     uhr_name: str,
     hrrt_name: str,
-    seg_name: str = "output_all_fast_firstseg.nii.gz"
+    t1_name: str,
 ) -> None :
     """Orchestrates the extraction of ROI means and generates cohort-level SUV plots.
 
-    This function iterates through patient subdirectories within an input folder,
-    extracts the mean SUV values for a predefined set of ROIs (FSL FIRST IDs),
-    and generates three summary visualizations: Violin plots, Bland-Altman plots,
-    and a percentage difference bar chart.
-
-    input_folder/
-    ├── patient_01/
-    │   ├── uhr_suv.nii.gz   <-- uhr_name
-    │   ├── hrrt_suv.nii.gz  <-- hrrt_name
-    │   └── output_all_fast_firstseg.nii.gz  <-- seg_name
-    ├── patient_02/
-    │   ├── uhr_suv.nii.gz
-    │   ├── hrrt_suv.nii.gz
-    │   └── output_all_fast_firstseg.nii.gz
-    └── patient_03/
-        ├── uhr_suv.nii.gz
-        ├── hrrt_suv.nii.gz
-        └── output_all_fast_firstseg.nii.gz
+    Workflow:
+    1. Iterates through patient folders in patient_dir.
+    2. Segments T1 and registers T1 to MNI space using ANTs (SyN).
+    3. Warps UHR and HRRT PET images to MNI space.
+    4. Normalizes PET intensities by the mean of the Gray/White matter mask (SUVR).
+    5. Extracts ROI means using the AAL atlas.
+    6. Generates summary Violin, Bland-Altman, and % Difference plots.
 
     Args:
-        input_folder: Path to the root directory containing patient sub-folders.
-            Each sub-folder must contain the UHR, HRRT, and segmentation files.
-        output_folder: Path where the resulting summary PNG files will be saved.
+        patient_dir: Root directory containing patient sub-folders.
+        output_dir: Path where the resulting summary PNG files will be saved.
         uhr_name: Filename of the UHR PET image (e.g., 'uhr_suv.nii.gz').
         hrrt_name: Filename of the HRRT PET image (e.g., 'hrrt_suv.nii.gz').
-        seg_name: Filename of the segmentation mask (default: FIRST segmentation).
-
-    Returns:
-        None. Saves "SUMMARY_Violin_Plots.png", "SUMMARY_BlandAltman_Plots.png",
-        and "SUMMARY_Percentage_Difference.png" to the output_folder.
-
-    Raises:
-        OSError: If input_folder does not exist or output_folder cannot be created.
+        t1_name: Filename of the T1 weighted nifti image (e.g., 't1.nii.gz').
     """
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
+    # Find the Atlas
+    aal_dir = os.path.expanduser('~/nilearn_data/aal_SPM12/')
+    # We need the .nii file and the .txt or .xml labels
+    aal_atlas_path = os.path.join(aal_dir, 'aal/ROI_MNI_V4.nii')
+    labels_path = os.path.join(aal_dir, 'aal/ROI_MNI_V4.xml')
 
-    # ROI IDs from FSL FIRST
-    roi_configs = {
-        # Thalamus
-        10: 'L_Thalamus', 49: 'R_Thalamus',
-        # Noyau Caudé
-        11: 'L_Caudate', 50: 'R_Caudate',
-        # Putamen
-        12: 'L_Putamen', 51: 'R_Putamen',
-        # Pallidum
-        13: 'L_Pallidum', 52: 'R_Pallidum',
-        # Hippocampe
-        17: 'L_Hippocampus', 53: 'R_Hippocampus',
-        # Amygdale
-        18: 'L_Amygdala', 54: 'R_Amygdala',
-        # Accumbens
-        26: 'L_Accumbens', 58: 'R_Accumbens',
-        # Tronc Cérébral
-        16: 'Brain_Stem'
+    # Define the regions of interest you want
+    target_names = {
+        'Hippocampus_L', 'Hippocampus_R',
+        'Caudate_L', 'Caudate_R',
+        'Putamen_L', 'Putamen_R',
+        'Pallidum_L', 'Pallidum_R',
+        'Thalamus_L', 'Thalamus_R',
+        'Amygdala_L', 'Amygdala_R'
     }
-    cohort_results = {name: {'UHR': [], 'HRRT': []} for name in roi_configs.values()}
+
+    tree = ET.parse(labels_path)
+    root = tree.getroot()
+
+    aal_roi_configs = {}
+    for label in root.iter('label'):
+        index = label.find('index')
+        name  = label.find('name')
+        if index is not None and name is not None and name.text in target_names:
+            aal_roi_configs[int(index.text)] = name.text
+
+    print("Loaded ROI configs:", aal_roi_configs)
+
+    cohort_results = {name: {'UHR': [], 'HRRT': []} for name in aal_roi_configs.values()}
+    mni_template = ants.image_read(ants.get_ants_data('mni'))
 
     # Get all items, join path, and filter to keep only directories
-    patient_folders = sorted([
-        os.path.join(input_folder, f) 
-        for f in os.listdir(input_folder) 
-        if os.path.isdir(os.path.join(input_folder, f))
-    ])
+    patient_dirs = [os.path.join(patient_dir, d) for d in os.listdir(patient_dir) 
+                    if os.path.isdir(os.path.join(patient_dir, d))]
 
-    print(f"Found {len(patient_folders)} subfolders.")
-        
-    for p_dir in patient_folders:
+    for p_dir in patient_dirs:
+        sub_id = os.path.basename(p_dir)
+        print(f"--- Processing {sub_id} ---")
+
+        # Paths
+        t1_path = os.path.join(p_dir, t1_name)
         uhr_path = os.path.join(p_dir, uhr_name)
         hrrt_path = os.path.join(p_dir, hrrt_name)
-        seg_path = os.path.join(p_dir, seg_name)
+        
+        # Load Images
+        t1 = ants.image_read(t1_path)
+        uhr = ants.image_read(uhr_path)
+        hrrt = ants.image_read(hrrt_path)
 
-        for roi_id, roi_name in roi_configs.items():
-            val_uhr = get_mean_from_mask(uhr_path, seg_path, roi_id)
-            val_hrrt = get_mean_from_mask(hrrt_path, seg_path, roi_id)
-            
-            if not np.isnan(val_uhr) and not np.isnan(val_hrrt):
-                cohort_results[roi_name]['UHR'].append(val_uhr)
-                cohort_results[roi_name]['HRRT'].append(val_hrrt)
+        # Registration: T1 -> MNI
+        reg = ants.registration(fixed=mni_template, moving=t1, type_of_transform='SyN')
+        
+        # Tissue Segmentation (for Whole Brain Mask)
+        t1_mask = ants.get_mask(t1)
 
-    output_violin = os.path.join(output_folder, "SUMMARY_Violin_Plots.png")
-    generate_summary_violin(cohort_results, output_violin)
+        # N3 bias correction first (improves segmentation quality)
+        t1_n3 = ants.n3_bias_field_correction(t1)
+
+        # Atropos: 3-class segmentation (1=CSF, 2=GM, 3=WM)
+        seg = ants.atropos(
+            a=t1_n3,
+            m='[0.2,1x1x1]',
+            c='[3,0]',
+            i='kmeans[3]',
+            x=t1_mask
+        )
+
+        # Warp masks to MNI space
+        gm_mni = ants.apply_transforms(fixed=mni_template, moving=seg['probabilityimages'][1],
+                                        transformlist=reg['fwdtransforms'])
+        wm_mni = ants.apply_transforms(fixed=mni_template, moving=seg['probabilityimages'][2],
+                                        transformlist=reg['fwdtransforms'])
+        
+        # Warp PET images to MNI
+        uhr_mni = ants.apply_transforms(fixed=mni_template, moving=uhr, transformlist=reg['fwdtransforms'])
+        hrrt_mni = ants.apply_transforms(fixed=mni_template, moving=hrrt, transformlist=reg['fwdtransforms'])
+
+        # Intensity Normalization (SUVR)
+        # Create Whole Brain mask in MNI space (Threshold 0.5)
+        wb_mask = (gm_mni + wm_mni).numpy() > 0.5
+        
+        uhr_data = uhr_mni.numpy()
+        hrrt_data = hrrt_mni.numpy()
+        
+        uhr_suvr_data = uhr_data / np.mean(uhr_data[wb_mask])
+        hrrt_suvr_data = hrrt_data / np.mean(hrrt_data[wb_mask])
+
+        # Convert back to Nibabel for Nilearn extraction
+        uhr_nii  = ants.to_nibabel_nifti(uhr_mni)
+        hrrt_nii = ants.to_nibabel_nifti(hrrt_mni)
+        uhr_nii  = nib.Nifti1Image(uhr_suvr_data, uhr_nii.affine, uhr_nii.header)
+        hrrt_nii = nib.Nifti1Image(hrrt_suvr_data, hrrt_nii.affine, hrrt_nii.header)
+
+        # ROI Extraction using AAL
+        masker = NiftiLabelsMasker(labels_img=aal_atlas_path, resampling_target="data")
+        
+        # Get mean for all AAL regions
+        uhr_means = masker.fit_transform(uhr_nii).flatten() 
+        hrrt_means = masker.fit_transform(hrrt_nii).flatten()
+
+        # Map specific ROI IDs to our results dict
+        # Note: AAL IDs in the NIfTI usually start from 1, Nilearn's output follows the sorted label order
+        labels = masker.labels_ 
+        for atlas_id, roi_name in aal_roi_configs.items():
+            if atlas_id in labels:
+                idx = labels.index(atlas_id)
+                cohort_results[roi_name]['UHR'].append(uhr_means[idx])
+                cohort_results[roi_name]['HRRT'].append(hrrt_means[idx])
     
-    output_ba = os.path.join(output_folder, "SUMMARY_BlandAltman_Plots.png")
-    generate_summary_bland_altman(cohort_results, output_ba)
-
-    output_diff = os.path.join(output_folder, "SUMMARY_Percentage_Difference.png")
-    generate_summary_percentage_difference(cohort_results, output_diff)
-
+    # Visualizations
+    if not os.path.exists(output_dir): 
+        os.makedirs(output_dir)
+    generate_summary_violin(cohort_results, os.path.join(output_dir, "Violin_SUVR.png"))
+    generate_summary_bland_altman(cohort_results, os.path.join(output_dir, "BlandAltman_SUVR.png"))
+    generate_summary_percentage_difference(cohort_results, os.path.join(output_dir, "Diff_SUVR.png"))
+            
 
 def main():
     parser = argparse.ArgumentParser(description='Cohort PET Analysis using Bland-Altman.')
     
     # Paths
-    parser.add_argument("--input_folder", required=True, help="Root folder containing patient sub-folders.")
-    parser.add_argument("--output_folder", required=True, help="Folder to save the plots.")
+    parser.add_argument("--patient_dir", required=True, help="Root folder containing patient sub-folders.")
+    parser.add_argument("--output_dir", required=True, help="Folder to save the plots.")
     
     # Dynamic Filenames
     parser.add_argument("--uhr_name", required=True, help="Name of the UHR PET file (e.g., DeepT1.nii.gz)")
     parser.add_argument("--hrrt_name", required=True, help="Name of the reference HRRT PET file (e.g., HRRTrecon.nii.gz)")
-    parser.add_argument("--seg_name", default="output_all_fast_firstseg.nii.gz", help="Name of the FIRST segmentation file.")
+    parser.add_argument("--t1_name", required=True, help="Name of the T1 weighted file (e.g., T1.nii.gz).")
 
     args = parser.parse_args()
 
     create_suv_plots(
-        input_folder=args.input_folder,
-        output_folder=args.output_folder,
+        patient_dir=args.patient_dir,
+        output_dir=args.output_dir,
         uhr_name=args.uhr_name,
         hrrt_name=args.hrrt_name,
-        seg_name=args.seg_name
+        t1_name=args.t1_name,
     )
 
 if __name__ == "__main__":

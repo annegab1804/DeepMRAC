@@ -13,9 +13,11 @@ dicom2nifti>=2.4.0
 nilearn>=0.10.2
 scikit-image>=0.22.0
 SimpleITK>=2.3.0
+antspyx>=0.4.2
 
 # Utilities
 wget
 scipy>=1.11.0
+scikit-learn>=1.3.0
 matplotlib>=3.8.0
 seaborn>=0.13.0

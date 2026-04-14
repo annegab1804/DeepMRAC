@@ -8,7 +8,107 @@ import dicom2nifti
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime, time
+import ants
+from nilearn.maskers import NiftiLabelsMasker
 
+
+def create_grey_and_white_masks(nifti_path: str, output_path: str) -> None:
+    """Segments a T1-weighted image into tissue probability masks.
+    
+    Uses the ANTs Atropos algorithm to classify voxels into CSF, Grey Matter (GM), 
+    and White Matter (WM) based on prior probability maps.
+
+    Args:
+        nifti_path: Path to the input T1-weighted NIfTI file.
+        output_path: Directory path where the resulting mask files will be saved.
+
+    Returns:
+        None. Saves 'gm_mask.nii.gz' and 'wm_mask.nii.gz' to the output directory.
+    """
+    # Load T1 image
+    t1 = ants.image_read(nifti_path)
+
+    # Run segmentation (Atropos)
+    # This creates tissue masks (1=CSF, 2=GM, 3=WM)
+    seg = ants.prior_based_segmentation(t1, ants.get_mask(t1))
+    gm_mask = seg['segmentation'] == 2
+    wm_mask = seg['segmentation'] == 3
+
+    ants.image_write(gm_mask.astype('float32'), os.path.join(output_path, "gm_mask.nii.gz"))
+    ants.image_write(wm_mask.astype('float32'), os.path.join(output_path, "wm_mask.nii.gz"))
+
+def align_pet_to_t1(pet_path: str, t1_path: str, output_path: str) -> None:
+    """Performs rigid-body registration to align a PET image to T1 structural space.
+    
+    Uses a 6-degree-of-freedom (6-DOF) transform to account for subject movement
+    between or during scans, ensuring PET voxels overlap correctly with T1 anatomy.
+
+    Args:
+        pet_path: Path to the moving PET NIfTI image.
+        t1_path: Path to the fixed T1 NIfTI image (the target space).
+        output_path: Directory path where the registered PET image will be saved.
+
+    Returns:
+        None. Saves 'pet_in_t1.nii.gz' to the output directory.
+    """
+    # Load images
+    pet = ants.image_read(pet_path)
+    t1 = ants.image_read(t1_path)
+
+    # Register PET to T1 (Rigid body: 6 degrees of freedom)
+    reg = ants.registration(fixed=t1, moving=pet, type_of_transform='Rigid')
+
+    # The registered PET in T1 space
+    pet_in_t1 = reg['warpedmovout']
+    ants.image_write(pet_in_t1, os.path.join(output_path, "pet_in_t1.nii.gz"))
+
+def extracting_roi(t1_path: str, pet_in_t1_path: str, aal_atlas_path: str) -> np.ndarray:
+    """Warps the AAL atlas to native T1 space and extracts mean ROI signals.
+    
+    This function calculates a non-linear (SyN) registration between the subject 
+    T1 and the MNI template, applies the inverse transform to the AAL atlas, 
+    and uses the resulting native-space atlas to extract PET values.
+
+    Args:
+        t1_path: Path to the subject's T1-weighted image.
+        pet_in_t1_path: Path to the PET image already coregistered to the T1.
+        aal_atlas_path: Path to the AAL atlas NIfTI file (in MNI space).
+
+    Returns:
+        A NumPy array containing the mean signal values for each ROI defined 
+        in the AAL atlas.
+    """
+    # Load an MNI template (often provided with AAL or Nilearn)
+    mni_template = ants.image_read(ants.get_ants_data('mni'))
+
+
+    t1 = ants.image_read(t1_path)
+
+    # Register T1 to MNI (Deformable/SyN)
+    # This gives us the forward and inverse warps
+    t1_to_mni = ants.registration(fixed=mni_template, moving=t1, type_of_transform='SyN')
+
+    aal_mni = ants.image_read(aal_atlas_path)
+
+    # Apply the inverse transform to the AAL atlas
+    aal_in_t1 = ants.apply_transforms(
+        fixed=t1,
+        moving=aal_mni,
+        transformlist=t1_to_mni['invtransforms'],
+        interpolator='genericLabel'  # CRITICAL: Preserves integer labels
+    )
+
+    # Saving temporarily to satisfy NiftiLabelsMasker input requirements
+    temp_atlas_path = 'aal_in_t1_space.nii.gz'
+    ants.image_write(aal_in_t1, temp_atlas_path)
+
+    # Initialize the masker with the warped AAL atlas
+    masker = NiftiLabelsMasker(labels_img=temp_atlas_path, standardization=False)
+
+    # Extract signals from the T1-space PET image
+    roi_values = masker.fit_transform(pet_in_t1_path)
+
+    return roi_values
 
 def hrrt_ecat_to_nifti_suv(file_path: str, output_nii_path: str) -> tuple[np.ndarray, float, time]:
     """Processes an HRRT ECAT7 file, converts to RAS orientation, and saves as NIfTI.
@@ -107,54 +207,6 @@ def uhr_dicom_to_nifti_suv(
     nib.save(final_img, output_nii_path)
 
     return uhr_suv
-
-def get_mean_from_mask(pet_path: str, mask_path:str, structure_id: int|None = None) -> float:
-    """Extracts mean intensity from a PET image using a FIRST segmentation mask.
-    
-    Args:
-        pet_path (str): Path to the NIfTI PET image.
-        mask_path (str): Path to the FIRST segmentation NIfTI image.
-        structure_id (int, opyional): The ID of the brain structure (e.g., 10 for L_Thalamus).
-        
-    Returns:
-        float: Mean intensity value, or np.nan if file/structure is missing.
-    """
-    if not os.path.exists(pet_path) or not os.path.exists(mask_path):
-        return np.nan
-        
-    try:
-        pet_obj = nib.load(pet_path)
-        mask_obj = nib.load(mask_path)
-        
-        # Check if dimensions match
-        if pet_obj.shape != mask_obj.shape:
-            print(f"DEBUG: Dimension mismatch for {pet_path}. "
-                  f"PET: {pet_obj.shape}, Mask: {mask_obj.shape}")
-            return np.nan
-
-        pet_data = pet_obj.get_fdata()
-        mask_data = mask_obj.get_fdata()
-        
-        binary_mask = (mask_data == structure_id)
-        mask_sum = np.sum(binary_mask)
-
-        if mask_sum == 0:
-            # This triggers if the ROI ID doesn't exist in the segmentation file
-            print(f"DEBUG: ROI {structure_id} not found in mask for {pet_path}")
-            return np.nan
-
-        roi_data = pet_data[binary_mask]
-        
-        if np.all(np.isnan(roi_data)):
-            print(f"DEBUG: All voxels in ROI {structure_id} are NaN in PET image")
-            return np.nan
-
-        # Use nanmean to be safe against isolated NaN voxels
-        return np.nanmean(roi_data)
-        
-    except Exception as e:
-        print(f"DEBUG: Unexpected error processing {pet_path}: {e}")
-        return np.nan
 
 def generate_summary_violin(
     cohort_results: dict[str, dict[str, list[float]]], 

@@ -14,6 +14,8 @@ setup(
         "nibabel>=5.2.0",
         "dicom2nifti>=2.4.0",
         "nilearn>=0.10.2",
+        "antspyx>=0.4.2",
+        "scikit-learn>=1.3.0",
         "scikit-image>=0.22.0",
         "SimpleITK>=2.3.0",
         "scipy>=1.11.0",
