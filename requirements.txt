@@ -1,8 +1,23 @@
-numpy
-tensorflow>=2
-pydicom>=1.2.0
-nibabel
-nipype
-dicom2nifti
+# Core Data & Arrays
+numpy>=1.26.0
+pandas>=2.1.0
+
+# Deep Learning (Optimized for Python 3.12)
+tensorflow>=2.16.1
+
+# Medical Imaging IO & Processing
+pydicom>=2.4.0
+pydicom-seg
+nibabel>=5.2.0
+dicom2nifti>=2.4.0
+nilearn>=0.10.2
+scikit-image>=0.22.0
+SimpleITK>=2.3.0
+antspyx>=0.4.2
+
+# Utilities
 wget
-nilearn
+scipy>=1.11.0
+scikit-learn>=1.3.0
+matplotlib>=3.8.0
+seaborn>=0.13.0

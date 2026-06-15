@@ -1,99 +1,184 @@
-﻿# DeepMRAC
-Deep learning based peudoCT generation from MRI.
+﻿# DeepMRAC - Inference and Evaluation Pipeline
+
+DeepMRAC is a deep learning-based framework for generating synthetic attenuation correction maps from various MRI sequences (Dixon, T1w MPRAGE, and UTE).
+
+This implementation utilizes the original models and methodology described in:
+Ladefoged CN, Hansen AE, Henriksen OM, et al. AI-driven attenuation correction for brain PET/MRI: Clinical evaluation of a dementia cohort and importance of the training group size. Neuroimage. 2020;222:117221. doi:10.1016/j.neuroimage.2020.117221 .
 
 ![Example pseudoCT images](/images/figure2.png)
 
-DeepMRAC is a deep learning network for obtaining attenuation correction umaps. The network works with input images:
- - Dixon-VIBE
- - T1 weighted MPRAGE
- - Ultra-short echo time (UTE)
+All versions are implemented for VB20P and VE11P in separate models.
 
-All versions are implemented for VB20P and VE11P in seperate models.
+## Overview 
 
-## Requirements
-Install appropriate GPU, CUDA and cuDNN toolkits. See https://www.tensorflow.org/install/gpu.
+The pipeline provides a fully automated end-to-end workflow, transforming raw anatomical MRI data into clinical-ready PET attenuation maps (sUmaps):
 
-To install the required software tools using pip, run:
+DICOM Orchestration: Automatically identifies and organizes raw MRI and Umap (DICOM or Interfile) datasets by Instance Number to ensure spatial continuity.
 
-```
-pip install -r requirements.txt
-```
+Standardized Pre-processing: * NIfTI Conversion: Converts vendor-specific DICOM data into a standardized NIfTI format.
 
-Please note - to use DeepDixon or DeepT1, you further need to install FSL, as the images are preprocessed to correct resolution.
+Isotropic Resampling: Resamples data to a unified 192×192×192 matrix (1.56mm isotropic voxels) to match the model's receptive field.
 
-The runtime with a decent GPU (e.g. Titan V) is about 4 seconds. The running time is about 15-20 minutes for CPU.
+Deep Learning Inference: Executes a 3D U-Net prediction using a sliding window approach (16-slice patches) to generate a synthetic CT (sCT) volume.
+
+Clinical Integration: * Inverse Transformation: Reverts the orientation and resamples the prediction back to the native Umap geometry.
+
+Header Re-projection: Wraps the predicted volume into the original DICOM/Interfile metadata (template) for seamless PACS or workstation integration.
+
+Quality Assurance: If a CT or CTAC is provided, automatically computes and saves global and tissue-specific metrics (MAE, PSNR, SSIM, and Dice) between the synthetic Umap and the CT one.
+
+To compare the reconstructed PET images using the synthetic umaps to the original PET images, two scripts are also provided. 
 
 ## Installation
-To install the scripts and models:
 
-``
-python install.py
-``
-
-Installation will place the run scripts at /opt/caai/bin/ and /opt/caai/rhscripts/, and the models at /opt/caai/share/. Make sure to have write access to /opt.
-The folders will be automatically created. Change the paths in the install.py script and DeepMRAC.py script if you wish to install elsewhere.
-
-Add /opt/caai/ to PYTHONPATH and /opt/caai/bin to PATH to use the scripts from anywhere.
-
-Example:
+### 1- Clone the repository
 
 ```
-export PATH=$PATH:/opt/caai/bin
-export PYTHONPATH=$PYTHONPATH:/opt/caai
+git clone git@github.com:annegab1804/DeepMRAC.git
 ```
 
-DeepMRAC are written for Tensorflow >= 2. The models have been tested with Tensorflow 2.1 as well as Tensorflow 1.8 (with Keras 2.2.4) on Ubuntu 18.04 running TITAN V and RTX.
+### 2- Download the models
 
-## Updating the script
-Download the latest version of the code, delete the old models and run installation again.
-```
-git pull
-rm -rf models.zip /opt/caai/share/DeepAC
-python install.py
-```
-
-## Running the script
-
-### Using DICOM input data
-```
-process_DeepUTE_dicom.py ﹤path to DICOM data﹥
-process_DeepDixon_dicom.py ﹤path to DICOM data﹥
-process_DeepT1_dicom.py < path to DICOM data >
-```
-
-The output will be a folder called DeepUTE/DeepDixon/DeepT1 within the DICOM data folder.
-
-### Using python function ( with pre-loaded data )
-**NOTE** The data for Dixon (inphase and outphase) and T1 must be preprocessed to isotropic voxel size on a 192x192 matrix. See the process_X_dicom.py scripts for details.
-
-```python
-from rhscripts.DeepMRAC import predict_DeepUTE, predict_DeepDixon, predict_DeepT1
-pseudoCT_UTE = predict_DeepUTE(ute1,ute2)
-pseudoCT_Dixon = predict_DeepDixon(inphase,outphase)
-pseudoCT_T1 = predict_DeepT1(t1)
+Download the models from https://drive.google.com/drive/folders/1WJS7n2torSBFBCCnoJhKN9SalYKSUdlM?usp=sharing and put them in the `models/` folder. 
+It should look like this: 
+```text
+DeepMRAC/
+└── models/
+    ├── DeepDixon/
+    │   ├── DeepDixon_VB20P_TF2.h5
+    │   └── DeepDixon_VE11P_model1_TF2.h5
+    ├── DeepT1/
+    │   ├── DeepT1_VB20P_TF2.h5
+    │   └── DeepT1_VE11P_model1_TF2.h5
+    └── DeepUTE/
+        ├── DeepUTE_VB20P_TF2.h5
+        └── DeepUTE_VE11P_model1_TF2.h5
 ```
 
-## How the models were trained
-### Patients
-The models were trained solely using Siemens Biograph mMR data from two software versions (VB20P and VE11P). We expect that DeepT1 should work for T1w MPRAGE sequences from other scanners, but this was not thoroughly tested. We require that the input images are aligned and resampled the same way the models were trained when the models are used for inference.
+### 3- Create a Conda environment 
 
-The VB20P models was trained and validated using **800+ subjects**. The VE11P models are fine-tuned from the VB20P models using **200+ subjects**.
+It is highly recommended to use a dedicated environment to manage dependencies with python 3.12.
+```
+# Create the environment
+conda create -n deepmrac_env python=3.12
 
-### Hardware
-The models were trained on a *POWER AC922* computer with **4 NVIDIA Tesla V100 32GB**. The computer from IBM allowed an increased batch size used during training (12 vs 3 previously used).
+# Activate the environment
+conda activate deepmrac_env
+```
 
-## Contact
-Claes Ladefoged, Rigshospitalet, Copenhagen, Denmark
-claes.noehr.ladefoged@regionh.dk
+### 4- Install the dependencies
 
-## Citation
-Please cite the main method manuscript when using our method.
+Using the provided `setup.py`, you can install the project and all its dependencies in one step. Using the -e flag (editable mode) allows you to modify the code without needing to reinstall.
+```
+# From the root of the repository
+pip install -e .
+```
 
-Ladefoged CN, Hansen AE, Henriksen OM, et al. AI-driven attenuation correction for brain PET/MRI: Clinical evaluation of a dementia cohort and importance of the training group size. Published online ahead of print, 2020 Aug 1. Neuroimage. 2020;222:117221. [doi:10.1016/j.neuroimage.2020.117221](https://www.sciencedirect.com/science/article/pii/S1053811920307072)
+## Running the scripts
 
-DeepUTE has been previously evaluated in the following publications:
+With the `deepmrac_env` environment activated, you can execute the following CLI commands from any directory. Choose the command corresponding to the model you wish to evaluate. MRI folder must contrain Dicom files. Umap folder must contain Dicom or Interfile files. Another CT can be provided (as a Dicom folder or directly a NIftI image) if you want to compare the synthetic CT results with it. You must provide the X-ray tube voltages of this CT scanner (kvp). 
 
-Ladefoged CN, Marner L, Hindsholm A, Law I, Højgaard L, Andersen FL. Deep Learning Based Attenuation Correction of PET/MRI in Pediatric Brain Tumor Patients: Evaluation in a Clinical Setting. Front Neurosci. 2019;12:1005. Published 2019 Jan 7. [doi:10.3389/fnins.2018.01005](https://www.frontiersin.org/articles/10.3389/fnins.2018.01005/full)
+### T1-weighted (MPRAGE) Model
 
-Øen SK, Keil TM, Berntsen EM, et al. Quantitative and clinical impact of MRI-based attenuation correction methods in 18F-FDG evaluation of dementia. EJNMMI Res. 2019;9(1):83. Published 2019 Aug 24. [doi:10.1186/s13550-019-0553-2](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6708519/)
+```
+process-deep-t1 \
+    --t1_path your_t1_folder \
+    --umap_path your_umap_folder \
+    --ct_path your_ct_path \
+    --ct_kvp 120 \
+    --output_folder output \
+    --verbose True \
+    --version VE11P #could be VB20P
+```
 
+
+### UTE (Ultra-short Echo Time) Model
+
+```
+process-deep-ute \
+    --ute1_path your_ute1_folder \
+    --ute2_path your_ute2_folder \
+    --umap_path your_umap_folder \
+    --ct_path your_ct_path \
+    --ct_kvp 120 \
+    --output_folder output 
+    --verbose True \
+    --version VE11P #could be VB20P
+```
+
+### Dixon (In-phase / Opposed-phase) Model
+
+```
+process-deep-dixon \
+    --inphase_path your_inphase_folder \
+    --opposedphase_path your_opposedphase_folder\
+    --umap_path your_umap_folder \
+    --ct_path your_ct_path \
+    --ct_kvp 120 \
+    --output_folder output \
+    --verbose True \
+    --version VE11P #could be VB20P
+```
+
+## Results and Metrics
+
+Upon completion, the pipeline:
+
+Generates a new DICOM series or interfile file in the specified output folder.
+
+Plots axial, coronal and sagittal views of the MRI inputs, the predicted Umap, the CT-Umap used as a template and the reference CT converted into a Umap if provided.
+
+If another CT is provided, prints quality metrics to the console and appends results to a summary file using Pandas: output/all_metrics.csv.
+
+## Plots to compare SUV 
+
+To evaluate the PET images reconstructed with synthetic Umaps (uhr) against a reference method (hrrt), we provide a dedicated evaluation workflow.
+
+### Prerequisites: AAL atlas Download
+
+You first need to download the Atlas manually by clicking this link in your browser: https://www.gin.cnrs.fr/AAL_files/aal_for_SPM12.tar.gz
+Then, oppen your terminal and run:
+```
+mkdir -p ~/nilearn_data/aal_SPM12
+mv ~/Downloads/aal_for_SPM12.tar*  ~/nilearn_data/aal_SPM12/
+cd ~/nilearn_data/aal_SPM12/
+tar -xzvf aal_for_SPM12.tar*
+```
+
+### Organizing for Batch Analysis
+
+Ensure your data is organized as follows to allow the script to iterate through all subjects:
+
+```
+patient_folder/
+    ├── patient_01/
+    │   ├── uhr_suv.nii.gz   <-- uhr_name
+    │   ├── hrrt_suv.nii.gz  <-- hrrt_name
+    │   └── t1.nii.gz  <-- t1_name
+    ├── patient_02/
+    │   ├── uhr_suv.nii.gz
+    │   ├── hrrt_suv.nii.gz
+    │   └── t1.nii.gz
+    └── patient_03/
+        ├── uhr_suv.nii.gz
+        ├── hrrt_suv.nii.gz
+        └── t1.nii.gz
+```
+
+### Generate Evaluation Plots
+
+Once the files are organized, run the following command to generate the statistical analysis (Bland-Altman, Percentage Difference, and Violin plots) for the different Regions of Interest (ROIs).
+
+```
+create-suv-plots \
+    --patient_dir patient_folder \
+    --output_dir suv_plots \
+    --uhr_name  uhr_suv.nii.gz \
+    --hrrt_name hrrt_suv.nii.gz \
+    --t1_name t1.nii.gz \
+```
+
+The script will create the `suv_plots` directory containing: 
+- `Violin_SUVR.png`: Distribution of SUVR across ROIs.
+- `BlandAltman_SUVR.png`: Agreement between UHR and HRRT.
+- `Diff_SUVR.png`: Percentage difference analysis.

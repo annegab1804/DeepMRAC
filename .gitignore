@@ -1,0 +1,10 @@
+__pycache__/
+datasets/
+output/
+*.gz
+deepmrac.egg-info/
+.DS_Store
+*.h5
+plots_suv/
+patient_folder/
+XCAL/

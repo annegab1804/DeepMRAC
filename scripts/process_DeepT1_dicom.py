@@ -1,230 +1,286 @@
-#!/usr/bin/env python3
-"""
-MRAC prediction using Deep Learning 3D U-net
-Author: Claes Ladefoged, Rigshospitalet, Copenhagen, Denmark
-        claes.noehr.ladefoged@regionh.dk
-Version: August-20-2019
-
-Input: 
-        path : Path to folder with dicom files of Dixon opposed-phase, in-phase, and Umap
-        model : Path to model, or 'ALL' if all 4 DeepDixon models is to be used. [Default: model1].
-        output: Path to output folder [Default: DeepDixon]
-Output: Folder with dicom files of MRAC DeepDixon within input folder path
-"""
-
-import argparse, os, shutil, datetime
-import numpy as np 
-import pydicom as dicom  
-import nibabel as nib
-import dicom2nifti
-from rhscripts.DeepMRAC import predict_DeepT1
+import argparse
 import tempfile
-from nilearn.image import resample_img
+import shutil
+import os
+import nibabel as nib
+import numpy as np
+from deepmrac.image_processing import (
+    str2bool,
+    sort_dicomfiles,
+    convert_dicom_to_nifti,
+    convert_interfile_to_nifti,
+    load_and_resample_images,
+    resample_to_output_format,
+    to_dcm,
+    to_interfile,
+    transform_ct_to_mu511
+)
+from deepmrac.predictions import predict_DeepT1
+from deepmrac.metrics import calculate_quality_metrics, save_metrics_to_csv
+from deepmrac.plots import plot_comparison
 
-""" Settings """
-tmpdir = ''
-verbose = False
 
-"""
-Sort the files in the input folder based on instance number.
-Store the files in a temporary folder
-"""
-def sort_files(folder):
-    os.mkdir(f'{tmpdir}/dicom')
-    
-    for root,subdirs,files in os.walk(folder):
-        
-        if len(subdirs) > 0:
-            continue
-        if not len(files) > 0:
-            continue
-        
-        if verbose:
-            print("Found files in %s. Making copy" % root)
-        
-        for f in files:
-            if f.startswith('.'):
-                continue
-            dcm = dicom.read_file("%s/%s" % (root,f))
+def run_pipeline(
+    t1_path: str,
+    umap_path: str,
+    output_folder: str,
+    ct_path: str | None = None,
+    ct_kvp: int = 120,
+    version: str | None = 'VE11P',
+    verbose: bool | None = True,
+):
+    """Executes the DeepT1 pipeline to generate synthetic Umaps from T1 and Umap data.
 
-            shutil.copyfile(os.path.join(root,f),"%s/dicom/dicom%000d.ima" % (tmpdir,int(dcm.InstanceNumber)))
-    
-"""
-Check that the correct number of files is present, and convert the images to nifti
-"""
-def convert_data():
-    if verbose:
-        print('Converting to nifti')
-    
-    dicom2nifti.dicom_series_to_nifti(f'{tmpdir}/dicom', f'{tmpdir}/t1.nii.gz', reorient_nifti=True)
+    This implementation is based on the methodology described in:
+    Ladefoged CN, Hansen AE, Henriksen OM, et al. AI-driven attenuation correction for 
+    brain PET/MRI: Clinical evaluation of a dementia cohort and importance of the 
+    training group size. Neuroimage. 2020;222:117221. doi:10.1016/j.neuroimage.2020.117221
 
-"""
-Resample the images to have isotropic voxel size (1.5626) and 192^3 matrix size
-"""
-def load_and_resample_images():
-    
-    if verbose:
-        print("Loading and resampling data")
-        
-    # Load dataset
-    t1 = nib.load(f'{tmpdir}/t1.nii.gz')
+    This pipeline sorts DICOM inputs, converts them to NIfTI, performs resampling, 
+    runs the deep learning prediction model, and exports the final result back 
+    into a DICOM or interfile format using the Umap as a header template. It finally calculates
+    and prints quality metrics (MAE, PSNR, SSIM, Dice) between synthetic Umap created and the
+    CT-Umap used as a template.
 
-    # Resample to 192x192x192 and isotropic voxel size of 1.5626    
-    target_shape = np.array((192,192,192))
-    new_resolution = [1.5626,-1.5626,-1.5626]
-    new_affine = np.zeros((4,4))
-    new_affine[:3,:3] = np.diag(new_resolution)
-    # putting point 0,0,0 in the middle of the new volume - this could be refined in the future
-    new_affine[:3,3] = target_shape*new_resolution/2.*-1
-    new_affine[3,3] = 1.
-    t1_rsl = resample_img(t1, target_affine=new_affine, target_shape=target_shape, interpolation='linear')
-    
-    # Flip to match orientation on what was trained on
-    img = np.flipud(np.swapaxes(t1_rsl.get_fdata(),0,2))
-    
-    # Return nii handles as well as new image
-    return t1, t1_rsl, img
+    Args:
+        t1_path (str): Path to the directory containing T1-weighted MPRAGE DICOM files.
+        umap_path (str): Path to the directory containing Umap DICOM or interfile files.
+        output_folder (str): Path where the resulting synthetic umap files will be saved.
+        ct_path (str, optional): Path to folder with dicom files or Path to the nifti file
+            of CT or CTAC. 
+            Defaults to None.
+        ct_kvp (int, optional): x-ray tube voltages of the CT scanner (kvp).
+            Defaults to 120.
+        version (str, optional): Model training version to use (e.g., 'VB20P' or 'VE11P'). 
+            Defaults to 'VE11P'.
+        verbose (bool, optional): If True, prints progress and status messages to the console. 
+            Defaults to True.
 
-"""
-Resample the predicted image back to dixon resolution and resample to umap format.
-"""
-def resample_to_native(DeepX, reference, reference_native, save_prediction=False):
-    if verbose:
-        print('Resampling back to native resolution')
-    
-    # Rehape to native resolution
-    DeepX = np.swapaxes(np.flipud(DeepX),2,0)
-    DeepX_nii = nib.Nifti1Image(DeepX, reference.affine, reference.header)
-    DeepX_rsl = resample_img(DeepX_nii,target_affine=reference_native.affine,target_shape=reference_native.shape,interpolation='linear')
-    
-    # Save intermediate nii file
-    if save_prediction:
-        if verbose:
-            print("Saving QC nii file to DeepT1_QC.nii.gz")
-        nib.save(DeepX_rsl,'DeepT1_QC.nii.gz')
-    
-    return DeepX_rsl.get_fdata()
+    Returns:
+        None. The function saves the generated files directly to the `output_folder`.
 
-"""
-Overwrite the container dicom files with
-    PixelData from predicted numpy array
-    SeriesInstanceUID and SOPInstanceUID to make it unique
-    Description and Number
-Saves new dicom series    
-"""
-def to_dcm(DeepX,dcmcontainer,dicomfolder):  
-    
-    def listdir_nohidden(path):
-        return [f for f in os.listdir(path) if not f.startswith('.')]
-    
-    # Read first file to get header information
-    ds=dicom.read_file(os.path.join(dcmcontainer,'dicom1.ima'))
-    LargestImagePixelValue = DeepX.max()
-    
-    # Fix orientation due to nifti ( perhaps this could be done smarter.. )
-    DeepX = np.fliplr(np.flipud(np.swapaxes(DeepX,2,0)))
-    np_DeepX = np.array(DeepX,dtype=ds.pixel_array.dtype)
-
-    # Generate unique SeriesInstanceUID
-    newSIUID = str(datetime.datetime.now())
-    newSIUID = newSIUID.replace("-","")
-    newSIUID = newSIUID.replace(" ","")
-    newSIUID = newSIUID.replace(":","")
-    newSIUID = newSIUID.replace(".","")
-    newSIUID = '1.3.12.2.1107.5.2.38.51014.' + str(newSIUID) + '11111.0.0.0' 
-
-    if not os.path.exists(dicomfolder):
-        os.mkdir(dicomfolder)
-
-    # Read each file in UMAP container, replace relevant tags
-    for f in listdir_nohidden(dcmcontainer):
-        ds=dicom.read_file(os.path.join(dcmcontainer,f))
-        i = int(ds.InstanceNumber)-1
-        
-        ds.LargestImagePixelValue = int(LargestImagePixelValue)
-        ds.PixelData = np_DeepX[:,:,i].tostring() # Inserts actual image info
-
-        ds.SeriesInstanceUID = newSIUID
-        ds.SeriesDescription = "DeepT1"
-        ds.SeriesNumber = "507"
-
-        # Generate unique SOPInstanceUID
-        newSOP = str(datetime.datetime.now())
-        newSOP = newSOP.replace("-","")
-        newSOP = newSOP.replace(" ","")
-        newSOP = newSOP.replace(":","")
-        newSOP = newSOP.replace(".","")
-        newSOP = '1.3.12.2.1107.5.2.38.51014.' + str(newSOP) + str(i+1)
-        ds.SOPInstanceUID = newSOP
-
-        # Save the file
-        fname = "dicom_%04d.dcm" % int(ds.InstanceNumber)
-        ds.save_as(os.path.join(dicomfolder,fname))
-    
-""" 
-Function to keep track of where to store the data
-Actual storing is performed in to_dcm()
-"""
-def convert_to_DCM(DeepX,patient,folder_outname):
-    if verbose:
-        print('Saving data to dicom')
-    
-    # Determine where to store the output dicom files
-    if folder_outname == None:
-       outname = os.path.join(patient,'DeepT1')
-    else:
-       outname = folder_outname
-    
-    # Convert the files
-    to_dcm(DeepX,os.path.join(tmpdir,'dicom'),outname)
-
-""" 
-Function to check output
-"""
-
-def check_output(x):
-    try:
-        x.shape
-        return True
-    except:
-        return False
-    
-if __name__ == "__main__":
-
-    parser = argparse.ArgumentParser(description='Predict using DeepDixon.')
-    parser.add_argument("patient", help="Path to patient.")
-    parser.add_argument("--outname", help="Name for output folder. ", type=str)
-    parser.add_argument("--version", help="Software version used to train the model (VB20P or VE11P) Default: VE11P. ", type=str, default='VE11P')
-    parser.add_argument("--save_nii", action="store_true")
-    parser.add_argument("-v", "--verbose", action="store_true")
-    args = parser.parse_args()
-    
-    # Set verbose level
-    verbose = args.verbose
+    Raises:
+        FileExistsError: If the `output_folder` already exists and contains files, 
+            or if the temporary sorting directory is not empty.
+        FileNotFoundError: If any of the input paths do not exist.
+        AttributeError: If a DICOM file is encountered that lacks an 'InstanceNumber'.
+        RuntimeError: If two DICOM files share the same InstanceNumber, or if 
+            NIfTI conversion/model prediction fails.
+    """
+    if os.path.exists(output_folder) and os.listdir(output_folder):
+        raise FileExistsError(
+            f"The output folder '{output_folder}' already exists and is not empty. "
+            "Please delete it or provide a different path to avoid data contamination."
+        )
     
     # Create temporary folder    
     tmpdir = tempfile.mkdtemp()
-    
-    # Sort files into specific folders
-    sort_files(args.patient)
-    
-    # Load and resample data
-    convert_data()
-    t1, t1_rsl, img = load_and_resample_images()
-    
-    # Predict
-    if verbose:
-        print("Predicting DeepT1 using %s model" % args.version)
-    DeepX = predict_DeepT1(img,args.version)
-    if not check_output(DeepX):
+
+    try:
+        # Sort and convert files into specific folders
+        # --- Process T1 (Standard DICOM) ---
+        sort_dicomfiles(source_folder=t1_path, temp_subfolder=f"{tmpdir}/t1_dcm", verbose=verbose)
+        convert_dicom_to_nifti(dicom_dir=f"{tmpdir}/t1_dcm", output_nii=f"{tmpdir}/t1.nii.gz", verbose=verbose)
+
+        # --- Process UMAP (Conditional: DICOM or Interfile) ---
+        # Check if there's an Interfile header in the source folder
+        interfile_headers = [f for f in os.listdir(umap_path) if f.lower().endswith('.i.hdr')]
+
+        if interfile_headers:
+            if verbose:
+                print(f"Detected Interfile format for UMAP in {umap_path}")
+            
+            # We take the first header found
+            hdr_full_path = os.path.join(umap_path, interfile_headers[0])
+
+            convert_interfile_to_nifti(hdr_path=hdr_full_path, output_nii_path=f"{tmpdir}/umap.nii.gz")
+
+        else:
+            if verbose:
+                print(f"Detected DICOM format for UMAP in {umap_path}")
+                
+            # Standard sorting for DICOM files
+            sort_dicomfiles(source_folder=umap_path, temp_subfolder=f"{tmpdir}/umap_dcm", verbose=verbose)
+            convert_dicom_to_nifti(dicom_dir=f"{tmpdir}/umap_dcm", output_nii=f"{tmpdir}/umap.nii.gz", verbose=verbose)
+
+        if verbose:
+            print("Checking umap scaling...")
+
+        umap_nat = nib.load(f'{tmpdir}/umap.nii.gz')     
+        if np.max(umap_nat.get_fdata()) > 10:
+            if verbose:
+                print(f"Scaling detected (Max: {np.max(umap_nat.get_fdata()):.2f}). Dividing by 10000.")
+            new_data = umap_nat.get_fdata() / 10000.0
+            umap_nat = nib.Nifti1Image(new_data, umap_nat.affine, umap_nat.header)
+            nib.save(umap_nat, f'{tmpdir}/umap.nii.gz')
+        else:
+            if verbose:
+                print(f"No scaling needed (Max: {np.max(umap_nat.get_fdata()):.4f}).")
+        
+        # Load and ressample data
+        t1_rsl, t1_ref = load_and_resample_images(nii_image=f"{tmpdir}/t1.nii.gz", verbose=verbose)
+
+        # Flip to match orientation on what was trained on
+        t1_rsl = np.flipud(np.swapaxes(t1_rsl, 0, 2)) 
+
+        # Predict
+        pred = predict_DeepT1(t1=t1_rsl, version=version)
+
+        # Flip back to the original orientation
+        pred = np.swapaxes(np.flipud(pred), 2, 0)
+        pred = pred / 10000 # convert back to umap's units
+
+        # Resample to Umap Format
+        pred_nii = nib.Nifti1Image(pred, t1_ref.affine, t1_ref.header)
+        os.makedirs(output_folder, exist_ok=True)
+        DeepX_nii = resample_to_output_format(pred_nii=pred_nii, umap_native=umap_nat, verbose=verbose, output_file=f"{output_folder}/DeepT1.nii.gz")
+       
+        # Final DICOM (using Umap as container)
+        if interfile_headers:
+            to_interfile(DeepX_nii=DeepX_nii, hdr_template=hdr_full_path, output_path=f"{output_folder}/DeepT1", rmi_type="T1")
+        else:
+            to_dcm(DeepX_nii=DeepX_nii, dcmcontainer=f"{tmpdir}/umap_dcm", dicomfolder=f"{output_folder}/DeepT1", rmi_type="T1")
+                
+        print(f"Success! Result saved in: {output_folder}")
+
+        ctac_nii_resampled_path = None
+
+        if ct_path and os.path.exists(ct_path):
+            is_nifti = ct_path.lower().endswith(('.nii', '.nii.gz'))
+
+            if is_nifti:
+                if verbose: print(f"CT is already NIfTI: {ct_path}")
+                ct_nat = nib.load(ct_path)
+            else:
+                # DICOM files
+                sort_dicomfiles(source_folder=ct_path, temp_subfolder=f"{tmpdir}/ct_dcm", verbose=verbose)
+                convert_dicom_to_nifti(dicom_dir=f"{tmpdir}/ct_dcm", output_nii=f"{tmpdir}/ct.nii.gz", verbose=verbose)
+                ct_nat = nib.load(f'{tmpdir}/ct.nii.gz')
+
+            data_sample = ct_nat.get_fdata()
+            min_val = np.min(data_sample)
+            max_val = np.max(data_sample)
+
+            # Check if the values correspond to CT or CTAC
+            if min_val < -50:
+                if verbose: 
+                    print(f"Detected CT data (HU range: {min_val:.1f} to {max_val:.1f}). Transforming to Mu511...")
+                ctac_nat = transform_ct_to_mu511(ct_nat, kvp=ct_kvp)
+            else:
+                if max_val > 10:
+                    if verbose:
+                        print(f"Detected AC/U-map data (Range: {min_val:.4f} to {max_val:.4f}). Skipping CT transform and dividing by 10000.")
+                    new_data = data_sample / 10000.0
+                    ctac_nat = nib.Nifti1Image(new_data, ct_nat.affine, ct_nat.header)
+                else:
+                    if verbose:
+                        print(f"Detected AC/U-map data (Range: {min_val:.4f} to {max_val:.4f}). Skipping CT transform.")
+                    ctac_nat = ct_nat
+            
+            ctac_nii_resampled_path = f"{output_folder}/CTAC_resampled.nii.gz"
+            ctac_rsl = resample_to_output_format(pred_nii=ctac_nat, umap_native=umap_nat, verbose=verbose, output_file=ctac_nii_resampled_path)
+
+            # Calculate metrics DeepT1 - CTAC
+            metrics_dict = calculate_quality_metrics(
+                smu_nii_path=f"{output_folder}/DeepT1.nii.gz",
+                mu_nii_path=ctac_nii_resampled_path,
+            )
+
+            if verbose:
+                print("\n" + "="*30)
+                print(" GLOBAL QUALITY METRICS ")
+                print("="*30)
+                print(f"PSNR: {metrics_dict['PSNR']:.2f}")
+                print(f"SSIM: {metrics_dict['SSIM']:.4f}")
+                        
+                for mode in ['tissue', 'bone']:
+                    print(f"\n--- {mode.upper()} ANALYSIS ---")
+                    print(f"MAE:  {metrics_dict[f'{mode}_MAE']:.4f}")
+                    print(f"ME:   {metrics_dict[f'{mode}_ME']:.4f}")
+                    print(f"RE:   {metrics_dict[f'{mode}_RE']:.4f}")
+                    print(f"ARE:  {metrics_dict[f'{mode}_ARE']:.4f}")
+                    print(f"Dice: {metrics_dict[f'{mode}_Dice']:.4f}")
+                print("="*30)
+
+            save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='DeepT1', output_folder=f"{output_folder}/metrics")
+
+            # Calculate metrics UTE Umap - CTAC
+            metrics_dict = calculate_quality_metrics(
+                    smu_nii_path=f'{tmpdir}/umap.nii.gz',
+                    mu_nii_path=ctac_nii_resampled_path,
+            )
+
+            save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='Template Umap', output_folder=f"{output_folder}/metrics")
+        
+        # Plot
+        plot_comparison(input_path=f"{tmpdir}/t1.nii.gz", prediction_path=f"{output_folder}/DeepT1.nii.gz", template_umap_path=f'{tmpdir}/umap.nii.gz', ctac_path=ctac_nii_resampled_path, model_type="T1", output_path=f"{output_folder}/comparison_plot.png")
+
+    finally:
         shutil.rmtree(tmpdir)
-        exit(-1)
-    
-    # Reshape image to native resolution
-    DeepX = resample_to_native(DeepX, t1_rsl, t1, args.save_nii)
-    
-    # Convert to DICOM
-    convert_to_DCM(DeepX,args.patient,args.outname)
-    
-    # Cleanup
-    shutil.rmtree(tmpdir)
+
+def main():
+    """MRAC prediction using Deep Learning 3D U-net
+    Author: Claes Ladefoged, Rigshospitalet, Copenhagen, Denmark
+            claes.noehr.ladefoged@regionh.dk
+    Version: August-20-2019
+    """
+    parser = argparse.ArgumentParser(description='Predict using DeepT1.')
+    parser.add_argument(
+        "--t1_path", 
+        help="Path to folder with dicom files of T1 weighted MPRAGE.", 
+        type=str,
+        required=True
+    )
+    parser.add_argument(
+        "--umap_path", 
+        help="Path to folder with dicom or interfile files of UTE Umap.", 
+        type=str,
+        required=True
+    )
+    parser.add_argument(
+        "--ct_path", 
+        help="Path to folder with dicom files or Path to the nifti file of CT or CTAC.", 
+        type=str,
+        default=None,
+        required=False,
+    )
+    parser.add_argument(
+        "--ct_kvp", 
+        help="X-ray tube voltages of the original CT scanner (kvp).", 
+        type=int,
+        default=120,
+        required=False,
+    )
+    parser.add_argument(
+        "--output_folder", 
+        help="Name for output folder. ", 
+        type=str,
+        required=True
+    )
+    parser.add_argument(
+        "--version", 
+        help="Software version used to train the model (VB20P or VE11P) Default: VE11P. ",
+        type=str,
+        default='VE11P',
+        required=False,
+    )
+    parser.add_argument(
+        "--verbose", 
+        type=str2bool, 
+        default=False,
+        required=False,
+    )
+    args = parser.parse_args()
+
+    run_pipeline(
+        t1_path=args.t1_path,
+        umap_path=args.umap_path,
+        ct_path=args.ct_path,
+        ct_kvp=args.ct_kvp,
+        output_folder=args.output_folder,
+        version=args.version,
+        verbose=args.verbose
+    )
+
+if __name__ == "__main__":
+    main()
