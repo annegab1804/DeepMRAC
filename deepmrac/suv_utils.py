@@ -3,39 +3,62 @@ import tempfile
 import numpy as np
 import pandas as pd
 import nibabel as nib
-import pydicom
 import dicom2nifti
 import matplotlib.pyplot as plt
 import seaborn as sns
-from datetime import datetime, time
+from datetime import datetime
 import ants
+import xml.etree.ElementTree as ET
 from nilearn.maskers import NiftiLabelsMasker
 
 
-def create_grey_and_white_masks(nifti_path: str, output_path: str) -> None:
-    """Segments a T1-weighted image into tissue probability masks.
+def create_whole_brain_mask(t1_path: str, reg: dict) -> np.ndarray:
+    """Performs tissue segmentation and creates a Whole Brain mask in MNI space.
     
-    Uses the ANTs Atropos algorithm to classify voxels into CSF, Grey Matter (GM), 
-    and White Matter (WM) based on prior probability maps.
+    This function applies N3 bias correction to the T1 image, segments it into 
+    three tissue classes (CSF, GM, WM) using the Atropos algorithm, and warps 
+    the resulting Grey Matter and White Matter probability maps to MNI space 
+    to create a binary Whole Brain mask.
 
     Args:
-        nifti_path: Path to the input T1-weighted NIfTI file.
-        output_path: Directory path where the resulting mask files will be saved.
+        t1_path: Path to the input T1-weighted NIfTI file.
+        reg: Dictionary containing registration transforms (from ants.registration) 
+             between the native T1 and the MNI template.
 
     Returns:
-        None. Saves 'gm_mask.nii.gz' and 'wm_mask.nii.gz' to the output directory.
+        A NumPy boolean array representing the Whole Brain mask (GM + WM) 
+        in MNI space, thresholded at 0.5.
     """
-    # Load T1 image
-    t1 = ants.image_read(nifti_path)
+    # Load images and template
+    mni_template = ants.image_read(ants.get_ants_data('mni'))
+    t1 = ants.image_read(t1_path)
 
-    # Run segmentation (Atropos)
-    # This creates tissue masks (1=CSF, 2=GM, 3=WM)
-    seg = ants.prior_based_segmentation(t1, ants.get_mask(t1))
-    gm_mask = seg['segmentation'] == 2
-    wm_mask = seg['segmentation'] == 3
+    # Pre-processing: Generate a brain mask and correct intensity bias
+    # The mask limits Atropos to brain tissue, and N3 improves class separation
+    t1_mask = ants.get_mask(t1)
+    t1_n3 = ants.n3_bias_field_correction(t1)
 
-    ants.image_write(gm_mask.astype('float32'), os.path.join(output_path, "gm_mask.nii.gz"))
-    ants.image_write(wm_mask.astype('float32'), os.path.join(output_path, "wm_mask.nii.gz"))
+    # Atropos: 3-class segmentation (1=CSF, 2=GM, 3=WM)
+    # We use k-means initialization for the three tissue types
+    seg = ants.atropos(
+        a=t1_n3,
+        m='[0.2,1x1x1]',
+        c='[3,0]',
+        i='kmeans[3]',
+        x=t1_mask
+    )
+
+    # Warp masks to MNI space
+    # Index 1 is Grey Matter, Index 2 is White Matter
+    gm_mni = ants.apply_transforms(fixed=mni_template, moving=seg['probabilityimages'][1],
+                                    transformlist=reg['fwdtransforms'])
+    wm_mni = ants.apply_transforms(fixed=mni_template, moving=seg['probabilityimages'][2],
+                                    transformlist=reg['fwdtransforms'])
+
+    # Create Whole Brain mask in MNI space (Threshold 0.5)
+    wb_mask = (gm_mni + wm_mni).numpy() > 0.5
+
+    return wb_mask
 
 def align_pet_to_t1(pet_path: str, t1_path: str, output_path: str) -> None:
     """Performs rigid-body registration to align a PET image to T1 structural space.
@@ -60,37 +83,44 @@ def align_pet_to_t1(pet_path: str, t1_path: str, output_path: str) -> None:
 
     # The registered PET in T1 space
     pet_in_t1 = reg['warpedmovout']
-    ants.image_write(pet_in_t1, os.path.join(output_path, "pet_in_t1.nii.gz"))
+    ants.image_write(pet_in_t1, output_path)
 
-def extracting_roi(t1_path: str, pet_in_t1_path: str, aal_atlas_path: str) -> np.ndarray:
+def extracting_roi(
+    t1_path: str,
+    pet_in_t1_path: str,
+    aal_atlas_path: str,
+    labels_path: str, 
+    target_names: set,
+) -> dict:
     """Warps the AAL atlas to native T1 space and extracts mean ROI signals.
     
     This function calculates a non-linear (SyN) registration between the subject 
     T1 and the MNI template, applies the inverse transform to the AAL atlas, 
-    and uses the resulting native-space atlas to extract PET values.
+    and uses the resulting native-space atlas to extract PET values for specific 
+    regions of interest.
 
     Args:
         t1_path: Path to the subject's T1-weighted image.
         pet_in_t1_path: Path to the PET image already coregistered to the T1.
         aal_atlas_path: Path to the AAL atlas NIfTI file (in MNI space).
+        labels_path: Path to the AAL atlas XML file containing label indices and names.
+        target_names: A set of strings containing the ROI names to extract. 
 
     Returns:
-        A NumPy array containing the mean signal values for each ROI defined 
-        in the AAL atlas.
+        A dictionary where keys are ROI names (str) and values are the 
+        corresponding mean PET signals (float).
     """
-    # Load an MNI template (often provided with AAL or Nilearn)
+    # Load the reference MNI template and the subject's T1 image
     mni_template = ants.image_read(ants.get_ants_data('mni'))
-
-
     t1 = ants.image_read(t1_path)
 
-    # Register T1 to MNI (Deformable/SyN)
-    # This gives us the forward and inverse warps
+    # Compute non-linear registration (SyN) from T1 to MNI space
+    # This generates the mapping needed to bring data back and forth between spaces
     t1_to_mni = ants.registration(fixed=mni_template, moving=t1, type_of_transform='SyN')
 
+    # Load the AAL atlas and warp it back to the subject's native T1 space
+    # We use the inverse transforms from the T1-to-MNI registration
     aal_mni = ants.image_read(aal_atlas_path)
-
-    # Apply the inverse transform to the AAL atlas
     aal_in_t1 = ants.apply_transforms(
         fixed=t1,
         moving=aal_mni,
@@ -98,74 +128,191 @@ def extracting_roi(t1_path: str, pet_in_t1_path: str, aal_atlas_path: str) -> np
         interpolator='genericLabel'  # CRITICAL: Preserves integer labels
     )
 
-    # Saving temporarily to satisfy NiftiLabelsMasker input requirements
-    temp_atlas_path = 'aal_in_t1_space.nii.gz'
-    ants.image_write(aal_in_t1, temp_atlas_path)
+    # Convert the warped ANTs image to a Nibabel object for Nilearn compatibility
+    aal_in_t1_nib = ants.to_nibabel_nifti(aal_in_t1)
 
-    # Initialize the masker with the warped AAL atlas
-    masker = NiftiLabelsMasker(labels_img=temp_atlas_path, standardization=False)
+    # Initialize the NiftiLabelsMasker to extract mean signals
+    # We use 'resampling_target="data"' to ensure the atlas matches the PET image dimensions
+    masker = NiftiLabelsMasker(
+        labels_img=aal_in_t1_nib, 
+        standardize=False, 
+        resampling_target="data"
+    )
+    # Extract mean values for all regions present in the warped atlas
+    # fit_transform returns a 2D array, we flatten it to get a 1D vector of means
+    roi_values = masker.fit_transform(pet_in_t1_path).flatten()
 
-    # Extract signals from the T1-space PET image
-    roi_values = masker.fit_transform(pet_in_t1_path)
+    # Identify which label IDs were actually processed by the masker
+    extracted_ids = masker.labels_
 
-    return roi_values
+    # Parse the AAL XML file to create a mapping between indices and anatomical names
+    tree = ET.parse(labels_path)
+    root = tree.getroot()
+    
+    id_to_name = {}
+    for label in root.iter('label'):
+        idx = label.find('index').text
+        name = label.find('name').text
+        if name in target_names:
+            id_to_name[int(idx)] = name
 
-def hrrt_ecat_to_nifti_suv(file_path: str, output_nii_path: str) -> tuple[np.ndarray, float, time]:
+    # Map the extracted numerical values back to their human-readable names
+    results = {}
+    for i, label_id in enumerate(extracted_ids):
+        # Check if the current ID from the masker is one of our target ROIs
+        if label_id in id_to_name:
+            region_name = id_to_name[label_id]
+            results[region_name] = roi_values[i]
+
+    return results
+
+def uhr_original_dicom_to_nifti_beqml(
+    dicom_dir: str, 
+    output_nii_path: str,
+    factor: float = 79.22,
+) -> None:
+    """Converts UHR DICOM images to NIfTI format and scales to Bq/mL.
+
+    This function performs the conversion of a DICOM directory into a single 
+    NIfTI volume, applies a calibration factor to convert raw counts into 
+    physical activity concentration (Bq/mL), and saves the result.
+
+    Args:
+        dicom_dir: Path to the directory containing the UHR DICOM slices.
+        output_nii_path: Full path (including filename) where the calibrated 
+            NIfTI image will be saved.
+        factor (float): Calibration factor to convert the voxels in beq/ml.
+            Default to 79.22.
+
+    Returns:
+        None. The function writes the converted image to disk at output_nii_path.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        dicom2nifti.convert_directory(dicom_dir, tmp_dir, compression=True, reorient=True)
+        # Find the created file
+        converted_file = [f for f in os.listdir(tmp_dir) if f.endswith('.nii.gz')][0]
+        uhr_nifti = nib.load(os.path.join(tmp_dir, converted_file))
+        activity_data = (uhr_nifti.get_fdata() * factor)
+        affine = uhr_nifti.affine.copy() # Use .copy() to be safe
+
+    print(f"Activity data in kBeq/ml- Max: {activity_data.max()}, Mean: {activity_data.mean()}")
+
+    # Save the final result
+    final_img = nib.Nifti1Image(activity_data, affine)
+    nib.save(final_img, output_nii_path)
+
+def hrrt_original_ecat_to_nifti_beqml(
+    file_path: str,
+    factor: float,
+    output_nii_path: str,
+) -> None:
     """Processes an HRRT ECAT7 file, converts to RAS orientation, and saves as NIfTI.
 
     Args:
-        file_path: Path to the input ECAT7 (.v) file.
-        output_nii_path: Path where the converted NIfTI file will be saved.
+        file_path (str): Path to the input ECAT7 (.v) file.
+        factor (float): Calibration factor to convert the voxels in beq/ml.
+        output_nii_path (str): Path where the resulting relative SUV NIfTI will be saved.
 
     Returns:
-        A tuple containing:
-            - data_ras (np.ndarray): The 3D image data in RAS orientation.
-            - dosage (float): The injected dose value from the ECAT header.
-            - hrrt_time_only (datetime.time): The scan start time as a time object.
+        None
     """
     ecat = nib.ecat.load(file_path)
-    # ECAT data usually needs to be multiplied by the scale factor in the subheader
     data = ecat.get_fdata() 
     affine = ecat.affine
 
-    # Handle 4D -> 3D
     if data.ndim == 4:
         # Extract first frame
         data_lpi = data[:, :, :, 0]
-        # We assume LPI orientation for HRRT by default
-        data_ras = data_lpi[::-1, ::-1, ::-1]
+    else:
+        data_lpi = data
+    # We assume LPI orientation for HRRT by default
+    data_ras = data_lpi[::-1, ::-1, ::-1] * factor
+
+    print(f"Activity data - Max: {data_ras.max()}, Mean: {data_ras.mean()}")
+
+    # Save the final result
+    final_img = nib.Nifti1Image(data_ras, affine)
+    nib.save(final_img, output_nii_path)
+
+def hrrt_ecat_to_nifti_suv(
+    file_path: str,
+    factor: float,
+    weight: float,
+    net_dose: int,
+    half_life: int,
+    start_time: str,
+    injection_time: str,
+    output_nii_path: str,
+) -> np.ndarray:
+    """Processes an HRRT ECAT7 file, converts to RAS orientation, and saves as NIfTI.
+
+    Args:
+        file_path (str): Path to the input ECAT7 (.v) file.
+        factor (float): Calibration factor to convert the voxels in beq/ml.
+        weight (float): The weight of the patient in kg.
+        net_dose (int): The injected dose in kBq.
+        half_life (int): Half life time of the radioactive tracer injected in seconds.
+        start_time (str): The start time of the HRRT scan for decay offset calculation.
+            'HH:MM' or 'HH:MM:SS'
+        injection_time (str): The time of the injection on the radiative tracer.
+            'HH:MM' or 'HH:MM:SS'
+        output_nii_path (str): Path where the resulting relative SUV NIfTI will be saved.
+
+    Returns:
+        np.ndarray: The normalized relative SUV image data.
+    """
+    ecat = nib.ecat.load(file_path)
+    data = ecat.get_fdata() 
+    affine = ecat.affine
+
+    if data.ndim == 4:
+        # Extract first frame
+        data_lpi = data[:, :, :, 0]
+    else:
+        data_lpi = data
+    # We assume LPI orientation for HRRT by default
+    data_ras = data_lpi[::-1, ::-1, ::-1]*factor/1000
+
+    print(f"Activity data in kBeq/ml - Max: {data_ras.max()}, Mean: {data_ras.mean()}")
+
+    delta_t = time_to_seconds(start_time) - time_to_seconds(injection_time)
+    if delta_t < 0:
+        print(f"Warning: delta_t is negative ({delta_t}s). Check timestamps.")
+
+    # Decay Correction 
+    decay_constant = np.log(2) / half_life
+    decay_corrected_dose = net_dose * np.exp(-decay_constant * delta_t)
     
-    # Extract headers (dosage and scan_start_time)
-    dosage = ecat.header['dosage']
+    # Normalize to Relative SUV
+    hrrt_suv = data_ras * weight / decay_corrected_dose
+    print(f"SUV - Max: {hrrt_suv.max()}, Mean: {hrrt_suv.mean()}")
 
-    # Convert Unix Timestamp to a Python 'time' object (HH:MM:SS)
-    unix_time = ecat.header['scan_start_time']
-    dt_object = datetime.fromtimestamp(unix_time)
-    # If the scanner was in Eastern Daylight Time (UTC-4)
-    # offset_seconds = -4 * 3600 
-    # dt_object = datetime.fromtimestamp(unix_time + offset_seconds)
-    hrrt_time_only = dt_object.time()
-
-    hrrt_suv = data_ras / dosage
-
-    nifti_img = nib.Nifti1Image(hrrt_suv, affine)
-    nib.save(nifti_img, output_nii_path)
-    
-    return hrrt_suv, dosage, hrrt_time_only
+    # Save the final result
+    final_img = nib.Nifti1Image(hrrt_suv, affine)
+    nib.save(final_img, output_nii_path)
+    return hrrt_suv
 
 def uhr_dicom_to_nifti_suv(
     dicom_dir: str, 
-    hrrt_dose: float, 
-    hrrt_time: time, 
+    weight: float,
+    net_dose: int,
+    half_life: int,
+    start_time: str,
+    injection_time: str,
     output_nii_path: str
 ) -> np.ndarray:
-    """Converts UHR DICOMs to NIfTI, applies decay correction relative to HRRT, and normalizes.
+    """Converts UHR DICOMs to NIfTI, applies decay correction, and normalizes.
 
     Args:
-        dicom_dir: Directory containing the UHR DICOM slices.
-        hrrt_dose: The dose value from the HRRT scan to be used as baseline.
-        hrrt_time: The start time of the HRRT scan for decay offset calculation.
-        output_nii_path: Path where the resulting relative SUV NIfTI will be saved.
+        dicom_dir (str): Directory containing the UHR DICOM slices.
+        weight (float): The weight of the patient in kg.
+        net_dose (int): The injected dose in kBq.
+        half_life (int): Half life time of the radioactive tracer injected in seconds.
+        start_time (str): The start time of the UHR scan for decay offset calculation.
+            'HH:MM' or 'HH:MM:SS'
+        injection_time (str): The time of the injection on the radiative tracer.
+            'HH:MM' or 'HH:MM:SS'
+        output_nii_path (str): Path where the resulting relative SUV NIfTI will be saved.
 
     Returns:
         np.ndarray: The normalized relative SUV image data.
@@ -175,32 +322,24 @@ def uhr_dicom_to_nifti_suv(
         # Find the created file
         converted_file = [f for f in os.listdir(tmp_dir) if f.endswith('.nii.gz')][0]
         uhr_nifti = nib.load(os.path.join(tmp_dir, converted_file))
-
-        # We call .get_fdata() HERE while the file still exists
-        activity_data = uhr_nifti.get_fdata() * 66
+        activity_data = uhr_nifti.get_fdata()
+        print(f"Original activity data - Max: {activity_data.max()}, Mean: {activity_data.mean()}")
+        activity_data = (uhr_nifti.get_fdata() * 79.22) / 1000.0
         affine = uhr_nifti.affine.copy() # Use .copy() to be safe
 
-    #  Extract Metadata for Decay Correction from the first DICOM slice
-    sample_slice = pydicom.dcmread(os.path.join(dicom_dir, os.listdir(dicom_dir)[0]))
-    
-    # Convert DICOM HHMMSS to a time object
-    uhr_time_str = sample_slice.SeriesTime.split('.')[0]
-    uhr_time = datetime.strptime(uhr_time_str, '%H%M%S').time()
+    print(f"Activity data - Max: {activity_data.max()}, Mean: {activity_data.mean()}")
 
-    # Calculate delta_t relative to HRRT scan start
-    dummy_date = datetime(2000, 1, 1)
-    delta_t = (datetime.combine(dummy_date, uhr_time) - 
-               datetime.combine(dummy_date, hrrt_time)).total_seconds()
+    delta_t = time_to_seconds(start_time) - time_to_seconds(injection_time)
+    if delta_t < 0:
+        print(f"Warning: delta_t is negative ({delta_t}s). Check timestamps.")
 
-    # Decay Correction using HRRT Dosage as baseline
-    half_life = float(sample_slice.get("RadionuclideHalfLife", 6588))
+    # Decay Correction
     decay_constant = np.log(2) / half_life
-    decay_corrected_dose = hrrt_dose * np.exp(-decay_constant * delta_t)
+    decay_corrected_dose = net_dose * np.exp(-decay_constant * delta_t)
     
     # Normalize to Relative SUV
-    # Note: dicom2nifti usually applies the RescaleSlope during conversion.
-    # If the voxel values are already calibrated, we just divide by dose.
-    uhr_suv = activity_data / decay_corrected_dose
+    uhr_suv = activity_data * weight / decay_corrected_dose
+    print(f"SUV - Max: {uhr_suv.max()}, Mean: {uhr_suv.mean()}")
 
     # Save the final result
     final_img = nib.Nifti1Image(uhr_suv, affine)
@@ -362,3 +501,15 @@ def generate_summary_percentage_difference(
     plt.savefig(save_path)
     print(f"--- Percentage Difference Bar Plot saved: {save_path}")
     plt.close()
+
+def time_to_seconds(time_str: str) -> float:
+    """Converts format 'HH:MM' or 'HH:MM:SS' to seconds."""
+    formats = ["%H:%M:%S", "%H:%M"]
+    
+    for fmt in formats:
+        try:
+            t = datetime.strptime(time_str, fmt)
+            return t.hour * 3600 + t.minute * 60 + t.second
+        except ValueError:
+            continue
+    raise ValueError(f"Invalid time format : {time_str}")

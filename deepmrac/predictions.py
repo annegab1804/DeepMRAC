@@ -92,7 +92,6 @@ def get_patches_znorm(
 
     return selected_patches
 
-
 def predict(
     model: tf.keras.Model,
     patches: np.ndarray
