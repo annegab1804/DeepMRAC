@@ -204,7 +204,7 @@ def run_pipeline(
 
             save_metrics_to_csv(metrics_dict=metrics_dict, rmi_type='DeepT1', output_folder=f"{output_folder}/metrics")
 
-            # Calculate metrics UTE Umap - CTAC
+            # Calculate metrics T1 Umap - CTAC
             metrics_dict = calculate_quality_metrics(
                     smu_nii_path=f'{tmpdir}/umap.nii.gz',
                     mu_nii_path=ctac_nii_resampled_path,

@@ -248,7 +248,7 @@ def load_dicom_volume_and_aspects(folder_path: str)-> tuple[np.ndarray, dict[str
         # Pass to the extraction utility (which ensures RAS orientation)
         return extracts_nifti_volume_and_aspects(img)
 
-def load_interfile_volume_and_aspects(hdr_path: str) -> tuple[np.ndarray, dict[str, float]]:
+def load_interfile_hrrt_volume_and_aspects(hdr_path: str) -> tuple[np.ndarray, dict[str, float]]:
     """Parses HRRT Interfile header to extract volume and pixel aspect ratios.
 
     This function reads the .i.hdr text file to find matrix dimensions and 
@@ -306,6 +306,89 @@ def load_interfile_volume_and_aspects(hdr_path: str) -> tuple[np.ndarray, dict[s
     nii_img = nib.Nifti1Image(volume_xyz_ras, affine)
     return extracts_nifti_volume_and_aspects(nii_img)
 
+def load_interfile_castor_volume_and_aspects(hdr_path: str) -> tuple[np.ndarray, dict[str, float]]:
+    """Parses CASToR Interfile header to extract volume and pixel aspect ratios.
+
+    This function handles the specific formatting of CASToR headers, including
+    the '!' prefix in keys and the use of 'first pixel offset' for the affine.
+
+    Args:
+        hdr_path (str): Path to the .hdr file.
+
+    Returns:
+        A tuple containing:
+            - volume: The 3D numpy array.
+            - aspects: A dictionary with 'axial', 'coronal', and 'sagittal' ratios.
+    """
+    # Read the header and clean the keys
+    header = {}
+    with open(hdr_path, 'r') as f:
+        for line in f:
+            if ':=' in line:
+                k, v = line.split(':=')
+                # CASToR often uses '!' at the start of keys; we strip it for consistency
+                clean_key = k.strip().lower().lstrip('!')
+                header[clean_key] = v.strip()
+
+    # Extract matrix dimensions and scaling factors
+    # matrix size [1]=X, [2]=Y, [3]=Z
+    dim = [int(header.get(f'matrix size [{i}]', 0)) for i in [1, 2, 3]]
+    vox_size = [float(header.get(f'scaling factor (mm/pixel) [{i}]', 1.0)) for i in [1, 2, 3]]
+
+    # Locate the binary data file
+    # Priority 1: Use the name specified in the header
+    binary_filename = header.get('name of data file')
+    
+    # Priority 2: Fallback to replacing .hdr with .img if the header key is missing or incorrect
+    if not binary_filename or not os.path.exists(os.path.join(os.path.dirname(hdr_path), binary_filename)):
+        binary_filename = os.path.basename(hdr_path).replace('.hdr', '.img')
+    
+    img_path = os.path.join(os.path.dirname(hdr_path), binary_filename)
+    
+    if not os.path.exists(img_path):
+        raise FileNotFoundError(f"CASToR binary file not found: {img_path}")
+
+    # Load binary data (CASToR 'short float' is float32)
+    data = np.fromfile(img_path, dtype=np.float32)
+    
+    # Validate voxel count (handling potential multi-frame data by taking the first frame)
+    expected_voxels = dim[0] * dim[1] * dim[2]
+    if data.size > expected_voxels:
+        data = data[:expected_voxels]
+    elif data.size < expected_voxels:
+        raise ValueError(f"Data size mismatch: expected {expected_voxels}, got {data.size}")
+
+    # Reshape and Orientation
+    # Interfile/CASToR stores data in (Z, Y, X) order
+    volume_zyx = data.reshape((dim[2], dim[1], dim[0]))
+    
+    # Transpose to (X, Y, Z) for NIfTI standard compatibility
+    volume_xyz_las = volume_zyx.transpose(2, 1, 0)
+    volume_xyz_ras = volume_xyz_las[::-1, :, :]
+
+    # Construct the Affine Matrix
+    # Use 'first pixel offset' if available in the header (typical for CASToR)
+    if 'first pixel offset (mm) [1]' in header:
+        off_x = float(header['first pixel offset (mm) [1]'])
+        off_y = float(header['first pixel offset (mm) [2]'])
+        off_z = float(header['first pixel offset (mm) [3]'])
+    else:
+        # Fallback: Auto-center the volume if offsets are missing
+        off_x = - (dim[0] - 1) * vox_size[0] / 2.0
+        off_y = - (dim[1] - 1) * vox_size[1] / 2.0
+        off_z = - (dim[2] - 1) * vox_size[2] / 2.0
+
+    affine = np.array([
+        [vox_size[0], 0,           0,           off_x],
+        [0,           vox_size[1], 0,           off_y],
+        [0,           0,           vox_size[2], off_z],
+        [0,           0,           0,           1.0]
+    ])
+
+    nii_img = nib.Nifti1Image(volume_xyz_ras, affine)
+
+    return extracts_nifti_volume_and_aspects(nii_img)
+
 def load_ecat_volume_and_aspects(path_v: str) -> tuple[np.ndarray, dict[str, float]]:
     """Parses ECAT7 file to extract volume and pixel aspect ratios.
 
@@ -322,7 +405,6 @@ def load_ecat_volume_and_aspects(path_v: str) -> tuple[np.ndarray, dict[str, flo
     """
     ecat_img = nib.ecat.load(path_v)
     data = ecat_img.get_fdata()
-    print(data.shape)
     affine = ecat_img.affine
 
     # Handle 4D -> 3D
@@ -334,7 +416,6 @@ def load_ecat_volume_and_aspects(path_v: str) -> tuple[np.ndarray, dict[str, flo
 
     nifti_img = nib.Nifti1Image(data_ras, affine)
     return extracts_nifti_volume_and_aspects(img_nii=nifti_img, verbose=True)
-
 
 def plot_comparison(
     input_path: str, 

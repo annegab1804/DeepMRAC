@@ -2,11 +2,8 @@ import os
 import argparse
 import numpy as np
 import ants
-import nibabel as nib
-from nilearn.maskers import NiftiLabelsMasker
-import xml.etree.ElementTree as ET
 
-from deepmrac.suv_utils import generate_summary_bland_altman, generate_summary_percentage_difference, generate_summary_violin
+from deepmrac.suv_utils import generate_summary_bland_altman, generate_summary_percentage_difference, generate_summary_violin, align_pet_to_t1, create_whole_brain_mask, extracting_roi
 
 def create_suv_plots(
     patient_dir: str,
@@ -19,11 +16,14 @@ def create_suv_plots(
 
     Workflow:
     1. Iterates through patient folders in patient_dir.
-    2. Segments T1 and registers T1 to MNI space using ANTs (SyN).
-    3. Warps UHR and HRRT PET images to MNI space.
-    4. Normalizes PET intensities by the mean of the Gray/White matter mask (SUVR).
-    5. Extracts ROI means using the AAL atlas.
-    6. Generates summary Violin, Bland-Altman, and % Difference plots.
+    2. Aligns PET images (UHR/HRRT) to their respective T1 structural space (Native).
+    3. Computes T1-to-MNI non-linear registration (SyN) and generates a 
+       Whole Brain mask in MNI space.
+    4. Calculates SUVR normalization factors by sampling MNI-warped PET 
+       images within the Whole Brain mask.
+    5. Warps the AAL atlas to Native T1 space to extract mean ROI signals.
+    6. Normalizes extracted values by the SUVR factor and generates summary 
+       Violin, Bland-Altman, and % Difference plots.
 
     Args:
         patient_dir: Root directory containing patient sub-folders.
@@ -37,6 +37,7 @@ def create_suv_plots(
     # We need the .nii file and the .txt or .xml labels
     aal_atlas_path = os.path.join(aal_dir, 'aal/ROI_MNI_V4.nii')
     labels_path = os.path.join(aal_dir, 'aal/ROI_MNI_V4.xml')
+    mni_template = ants.image_read(ants.get_ants_data('mni'))
 
     # Define the regions of interest you want
     target_names = {
@@ -48,22 +49,9 @@ def create_suv_plots(
         'Amygdala_L', 'Amygdala_R'
     }
 
-    tree = ET.parse(labels_path)
-    root = tree.getroot()
+    cohort_results = {name: {'UHR': [], 'HRRT': []} for name in target_names}
 
-    aal_roi_configs = {}
-    for label in root.iter('label'):
-        index = label.find('index')
-        name  = label.find('name')
-        if index is not None and name is not None and name.text in target_names:
-            aal_roi_configs[int(index.text)] = name.text
-
-    print("Loaded ROI configs:", aal_roi_configs)
-
-    cohort_results = {name: {'UHR': [], 'HRRT': []} for name in aal_roi_configs.values()}
-    mni_template = ants.image_read(ants.get_ants_data('mni'))
-
-    # Get all items, join path, and filter to keep only directories
+    # Iterate through patients
     patient_dirs = [os.path.join(patient_dir, d) for d in os.listdir(patient_dir) 
                     if os.path.isdir(os.path.join(patient_dir, d))]
 
@@ -75,72 +63,47 @@ def create_suv_plots(
         t1_path = os.path.join(p_dir, t1_name)
         uhr_path = os.path.join(p_dir, uhr_name)
         hrrt_path = os.path.join(p_dir, hrrt_name)
-        
-        # Load Images
+
+        # Temp file for aligned PET (as required by current extracting_roi signature)
+        uhr_aligned_path = os.path.join(p_dir, "uhr_in_t1.nii.gz")
+        hrrt_aligned_path = os.path.join(p_dir, "hrrt_in_t1.nii.gz")
+
+        # STEP 1: Align PET to T1 (Intra-subject)
+        align_pet_to_t1(uhr_path, t1_path, os.path.dirname(uhr_aligned_path))
+        align_pet_to_t1(hrrt_path, t1_path, os.path.dirname(hrrt_aligned_path))
+
+        # STEP 2: Register T1 to MNI for Masking (SyN for accuracy)
         t1 = ants.image_read(t1_path)
-        uhr = ants.image_read(uhr_path)
-        hrrt = ants.image_read(hrrt_path)
+        reg_t1_mni = ants.registration(fixed=mni_template, moving=t1, type_of_transform='SyN')
 
-        # Registration: T1 -> MNI
-        reg = ants.registration(fixed=mni_template, moving=t1, type_of_transform='SyN')
-        
-        # Tissue Segmentation (for Whole Brain Mask)
-        t1_mask = ants.get_mask(t1)
+        # STEP 3: Create Whole Brain Mask
+        wb_mask_mni = create_whole_brain_mask(t1_path, reg_t1_mni)
 
-        # N3 bias correction first (improves segmentation quality)
-        t1_n3 = ants.n3_bias_field_correction(t1)
-
-        # Atropos: 3-class segmentation (1=CSF, 2=GM, 3=WM)
-        seg = ants.atropos(
-            a=t1_n3,
-            m='[0.2,1x1x1]',
-            c='[3,0]',
-            i='kmeans[3]',
-            x=t1_mask
-        )
-
-        # Warp masks to MNI space
-        gm_mni = ants.apply_transforms(fixed=mni_template, moving=seg['probabilityimages'][1],
-                                        transformlist=reg['fwdtransforms'])
-        wm_mni = ants.apply_transforms(fixed=mni_template, moving=seg['probabilityimages'][2],
-                                        transformlist=reg['fwdtransforms'])
-        
-        # Warp PET images to MNI
-        uhr_mni = ants.apply_transforms(fixed=mni_template, moving=uhr, transformlist=reg['fwdtransforms'])
-        hrrt_mni = ants.apply_transforms(fixed=mni_template, moving=hrrt, transformlist=reg['fwdtransforms'])
-
-        # Intensity Normalization (SUVR)
-        # Create Whole Brain mask in MNI space (Threshold 0.5)
-        wb_mask = (gm_mni + wm_mni).numpy() > 0.5
+        # STEP 4: Intensity Normalization (SUVR)
+        # Note: We warp PET to MNI just to calculate the SUVR reference
+        uhr_mni = ants.apply_transforms(fixed=mni_template, moving=ants.image_read(uhr_aligned_path), 
+                                        transformlist=reg_t1_mni['fwdtransforms'])
+        hrrt_mni = ants.apply_transforms(fixed=mni_template, moving=ants.image_read(hrrt_aligned_path), 
+                                         transformlist=reg_t1_mni['fwdtransforms'])
         
         uhr_data = uhr_mni.numpy()
         hrrt_data = hrrt_mni.numpy()
-        
-        uhr_suvr_data = uhr_data / np.mean(uhr_data[wb_mask])
-        hrrt_suvr_data = hrrt_data / np.mean(hrrt_data[wb_mask])
 
-        # Convert back to Nibabel for Nilearn extraction
-        uhr_nii  = ants.to_nibabel_nifti(uhr_mni)
-        hrrt_nii = ants.to_nibabel_nifti(hrrt_mni)
-        uhr_nii  = nib.Nifti1Image(uhr_suvr_data, uhr_nii.affine, uhr_nii.header)
-        hrrt_nii = nib.Nifti1Image(hrrt_suvr_data, hrrt_nii.affine, hrrt_nii.header)
+        # Use the mask to get mean and normalize
+        uhr_suvr_val = np.mean(uhr_data[wb_mask_mni])
+        hrrt_suvr_val = np.mean(hrrt_data[wb_mask_mni])
 
-        # ROI Extraction using AAL
-        masker = NiftiLabelsMasker(labels_img=aal_atlas_path, resampling_target="data")
-        
-        # Get mean for all AAL regions
-        uhr_means = masker.fit_transform(uhr_nii).flatten() 
-        hrrt_means = masker.fit_transform(hrrt_nii).flatten()
+        # STEP 5: ROI Extraction 
+        # This function handles the warp of the atlas internally
+        uhr_rois = extracting_roi(t1_path, uhr_aligned_path, aal_atlas_path, labels_path, target_names)
+        hrrt_rois = extracting_roi(t1_path, hrrt_aligned_path, aal_atlas_path, labels_path, target_names)
 
-        # Map specific ROI IDs to our results dict
-        # Note: AAL IDs in the NIfTI usually start from 1, Nilearn's output follows the sorted label order
-        labels = masker.labels_ 
-        for atlas_id, roi_name in aal_roi_configs.items():
-            if atlas_id in labels:
-                idx = labels.index(atlas_id)
-                cohort_results[roi_name]['UHR'].append(uhr_means[idx])
-                cohort_results[roi_name]['HRRT'].append(hrrt_means[idx])
-    
+        # STEP 6: Store results (Normalizing the means by the SUVR reference)
+        for roi in target_names:
+            if roi in uhr_rois and roi in hrrt_rois:
+                cohort_results[roi]['UHR'].append(uhr_rois[roi] / uhr_suvr_val)
+                cohort_results[roi]['HRRT'].append(hrrt_rois[roi] / hrrt_suvr_val)
+
     # Visualizations
     if not os.path.exists(output_dir): 
         os.makedirs(output_dir)

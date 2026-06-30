@@ -173,6 +173,84 @@ def convert_interfile_to_nifti(hdr_path: str, output_nii_path: str) -> None:
     # Save
     nii_img = nib.Nifti1Image(volume_xyz_ras, affine)
     nib.save(nii_img, output_nii_path)
+    
+def convert_castor_interfile_to_nifti(hdr_path: str, output_nii_path: str) -> None:
+    """Converts a Castor Interfile volume to a standardized NIfTI image.
+
+    This function handles the specific formatting of CASToR headers, including
+    the '!' prefix in keys and the use of 'first pixel offset' for the affine.
+
+    Args:
+        hdr_path (str): Path to the .hdr file.
+        output_nii_path (str): Full path where the .nii.gz file will be saved.
+    """
+    # Read the header and clean the keys
+    header = {}
+    with open(hdr_path, 'r') as f:
+        for line in f:
+            if ':=' in line:
+                k, v = line.split(':=')
+                # CASToR often uses '!' at the start of keys; we strip it for consistency
+                clean_key = k.strip().lower().lstrip('!')
+                header[clean_key] = v.strip()
+
+    # Extract matrix dimensions and scaling factors
+    # matrix size [1]=X, [2]=Y, [3]=Z
+    dim = [int(header.get(f'matrix size [{i}]', 0)) for i in [1, 2, 3]]
+    vox_size = [float(header.get(f'scaling factor (mm/pixel) [{i}]', 1.0)) for i in [1, 2, 3]]
+
+    # Locate the binary data file
+    # Priority 1: Use the name specified in the header
+    binary_filename = header.get('name of data file')
+    
+    # Priority 2: Fallback to replacing .hdr with .img if the header key is missing or incorrect
+    if not binary_filename or not os.path.exists(os.path.join(os.path.dirname(hdr_path), binary_filename)):
+        binary_filename = os.path.basename(hdr_path).replace('.hdr', '.img')
+    
+    img_path = os.path.join(os.path.dirname(hdr_path), binary_filename)
+    
+    if not os.path.exists(img_path):
+        raise FileNotFoundError(f"CASToR binary file not found: {img_path}")
+
+    # Load binary data (CASToR 'short float' is float32)
+    data = np.fromfile(img_path, dtype=np.float32)
+    
+    # Validate voxel count (handling potential multi-frame data by taking the first frame)
+    expected_voxels = dim[0] * dim[1] * dim[2]
+    if data.size > expected_voxels:
+        data = data[:expected_voxels]
+    elif data.size < expected_voxels:
+        raise ValueError(f"Data size mismatch: expected {expected_voxels}, got {data.size}")
+
+    # Reshape and Orientation
+    # Interfile/CASToR stores data in (Z, Y, X) order
+    volume_zyx = data.reshape((dim[2], dim[1], dim[0]))
+    
+    # Transpose to (X, Y, Z) for NIfTI standard compatibility
+    volume_xyz_las = volume_zyx.transpose(2, 1, 0)
+    volume_xyz_ras = volume_xyz_las[::-1, :, :]
+
+    # Construct the Affine Matrix
+    # Use 'first pixel offset' if available in the header (typical for CASToR)
+    if 'first pixel offset (mm) [1]' in header:
+        off_x = float(header['first pixel offset (mm) [1]'])
+        off_y = float(header['first pixel offset (mm) [2]'])
+        off_z = float(header['first pixel offset (mm) [3]'])
+    else:
+        # Fallback: Auto-center the volume if offsets are missing
+        off_x = - (dim[0] - 1) * vox_size[0] / 2.0
+        off_y = - (dim[1] - 1) * vox_size[1] / 2.0
+        off_z = - (dim[2] - 1) * vox_size[2] / 2.0
+
+    affine = np.array([
+        [vox_size[0], 0,           0,           off_x],
+        [0,           vox_size[1], 0,           off_y],
+        [0,           0,           vox_size[2], off_z],
+        [0,           0,           0,           1.0]
+    ])
+
+    nii_img = nib.Nifti1Image(volume_xyz_ras, affine)
+    nib.save(nii_img, output_nii_path)
 
 def convert_dicom_to_nifti(
     dicom_dir: str,
@@ -255,7 +333,6 @@ def load_and_resample_images(
     
     # Return nii handles as well as new image
     return data, nii_ref
-
 
 def resample_to_output_format(
     pred_nii: nib.nifti1.Nifti1Image,

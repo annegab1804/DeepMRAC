@@ -106,7 +106,6 @@ def calculate_quality_metrics(
 
     return metrics_dict
 
-
 def save_metrics_to_csv(
     metrics_dict: dict,
     rmi_type: str,
@@ -143,7 +142,6 @@ def save_metrics_to_csv(
         df_new.to_csv(csv_path, mode='w', index=False, header=True)
         
     print(f"Metrics saved at : {csv_path}")
-
 
 def calculate_synthesis_metrics(
     tabs_list: list[pd.DataFrame]

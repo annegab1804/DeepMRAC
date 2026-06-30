@@ -1,6 +1,5 @@
 __pycache__/
 datasets/
-output/
 *.gz
 deepmrac.egg-info/
 .DS_Store
@@ -8,3 +7,6 @@ deepmrac.egg-info/
 plots_suv/
 patient_folder/
 XCAL/
+Castor/
+list-mode/
+YRT_PET/
