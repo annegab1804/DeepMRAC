@@ -1,6 +1,5 @@
 __pycache__/
 datasets/
-*.gz
 deepmrac.egg-info/
 .DS_Store
 *.h5
