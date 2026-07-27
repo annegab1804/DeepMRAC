@@ -5,7 +5,7 @@ deepmrac.egg-info/
 *.h5
 plots_suv/
 patient_folder/
-XCAL/
+XCAL_recon/
 Castor/
 list-mode/
 YRT_PET/
